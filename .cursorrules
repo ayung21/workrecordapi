@@ -1,0 +1,44 @@
+# Pesan commit Git (tombol Generate di Source Control)
+
+Saat Cursor menghasilkan pesan Git commit untuk repository ini:
+
+- Tulis **selalu dalam Bahasa Indonesia** (subjek dan body jika ada).
+- Gunakan **Conventional Commits**: prefix `feat:`, `fix:`, `refactor:`, `chore:`, `docs:`, `test:` diikuti deskripsi Indonesia.
+- **Subjek**: satu baris, singkat (~72 karakter jika memungkinkan), fokus pada *mengapa* / dampak keseluruhan, bukan daftar file.
+- Hindari English kecuali nama proper (React, API, JWT, dll.) atau istilah teknis yang memang standar di tim.
+
+## Body commit — kapan wajib vs opsional
+
+**Perubahan kecil (1–4 file, satu area/fitur):**
+- Body **opsional**; cukup subjek jika sudah jelas.
+
+**Perubahan besar (≥5 file, atau menyentuh beberapa modul — mis. PO + Contract + utils):**
+- Body **wajib** — ringkas tapi **lengkap**, agar reviewer paham cakupan tanpa buka diff.
+- Format body:
+  - Baris kosong setelah subjek.
+  - Bullet `-` per **area/fitur** (bukan per file), 1–2 kalimat per poin.
+  - Kelompokkan logis: form, view, API/payload, validasi, layout/UI, refactor shared, dll.
+  - Sebut modul bila relevan: PO, Contract, SO, MOD, Inquiry.
+- Jangan salin diff baris per baris; fokus **apa yang berubah** dan **dampaknya**.
+
+Contoh subjek + body (perubahan besar):
+
+```
+feat: selaraskan form PO converting dengan model container dan biaya
+
+- PO converting: jumbo ganda per container, payload containers[] + merge saat edit
+- MaterialListCards: urutan UOM1 → Per → UOM konversi, grid kolom dinamis
+- Biaya (Freight, Additional, Trucking, THC): satu baris di PO, Contract, dan view
+- Contract: field biaya read-only dengan style disabled abu-abu
+```
+
+Contoh subjek saja (perubahan kecil):
+
+```
+fix: perbaiki validasi input jumlah pada form SO jumbo
+```
+
+Contoh yang dihindari:
+- feat: add permission guard for contract routes (English)
+- update files (terlalu vague)
+- Body berisi 20 baris path file tanpa penjelasan makna
