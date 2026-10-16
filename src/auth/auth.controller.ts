@@ -1,4 +1,4 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { Public } from '../common/decorators/public.decorator';
@@ -11,6 +11,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtPayload } from './types/jwt-payload';
 import { RequestEmailVerifyDto } from './dto/request-email-verify.dto';
+import { ActivateAccountDto } from './dto/activate-account.dto';
 import { Req } from '@nestjs/common';
 import { Request } from 'express';
 import { extractRequestMeta } from '../common/utils/request-context';
@@ -26,6 +27,23 @@ export class AuthController {
     return this.auth.login(dto.login, dto.password, extractRequestMeta(req));
   }
 
+  @Public()
+  @Post('admin/login')
+  loginPlatformAdmin(@Body() dto: LoginDto, @Req() req: Request) {
+    return this.auth.loginPlatformAdmin(
+      dto.login,
+      dto.password,
+      extractRequestMeta(req),
+    );
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Get('me')
+  me(@CurrentUser() user: JwtPayload) {
+    return this.auth.getProfile(user.sub);
+  }
+
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Post('change-password')
@@ -39,13 +57,17 @@ export class AuthController {
   @Public()
   @Post('forgot-password')
   forgotPassword(@Body() dto: ForgotPasswordDto) {
-    return this.auth.requestPasswordReset(dto.email);
+    return this.auth.requestPasswordResetOtp(dto.login);
   }
 
   @Public()
   @Post('reset-password')
   resetPassword(@Body() dto: ResetPasswordDto) {
-    return this.auth.resetPassword(dto.token, dto.newPassword);
+    return this.auth.resetPasswordWithOtp(
+      dto.login,
+      dto.otp,
+      dto.newPassword,
+    );
   }
 
   @ApiBearerAuth()
@@ -62,5 +84,18 @@ export class AuthController {
   @Post('verify-email')
   verifyEmail(@Body() dto: VerifyEmailDto) {
     return this.auth.verifyEmail(dto.token);
+  }
+
+  @Public()
+  @Get('activate-account')
+  activationPreview(@Query('token') token: string) {
+    return this.auth.getActivationPreview(token);
+  }
+
+  @Public()
+  @Post('activate-account')
+  async activateAccount(@Body() dto: ActivateAccountDto) {
+    await this.auth.activateAccount(dto.token, dto.password);
+    return { ok: true };
   }
 }
