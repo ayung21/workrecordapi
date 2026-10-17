@@ -1,9 +1,8 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { AuditAction } from '@prisma/client';
+import { AuditAction } from '../database/enums';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
-import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtPayload } from '../auth/types/jwt-payload';
 import { AuditService } from './audit.service';
@@ -24,7 +23,7 @@ export class AuditController {
     @Query('limit') limit?: string,
   ) {
     if (user.roleCode === 'OWNER') {
-      return this.audit.list({
+      return this.audit.listEnriched({
         companyId,
         action,
         limit: limit ? Number(limit) : undefined,
