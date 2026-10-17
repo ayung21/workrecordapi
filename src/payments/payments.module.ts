@@ -6,11 +6,17 @@ import { BimaSaktiGateway } from './bimasakti.gateway';
 import { PaymentGatewayFactory } from './payment-gateway.factory';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { ViewAccessModule } from '../view-access/view-access.module';
+import { BlacklistsModule } from '../blacklists/blacklists.module';
+import { VouchersModule } from '../vouchers/vouchers.module';
+import { AdsModule } from '../ads/ads.module';
 
 @Module({
   imports: [
     forwardRef(() => SubscriptionsModule),
     forwardRef(() => ViewAccessModule),
+    forwardRef(() => BlacklistsModule),
+    VouchersModule,
+    forwardRef(() => AdsModule),
   ],
   providers: [
     PaymentsService,
@@ -19,6 +25,6 @@ import { ViewAccessModule } from '../view-access/view-access.module';
     PaymentGatewayFactory,
   ],
   controllers: [PaymentsController],
-  exports: [PaymentsService],
+  exports: [PaymentsService, PaymentGatewayFactory],
 })
 export class PaymentsModule {}
