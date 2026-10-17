@@ -1,31 +1,48 @@
-import { IsDateString, IsOptional, IsString, MinLength } from 'class-validator';
+import {
+  IsDateString,
+  IsOptional,
+  IsString,
+  Matches,
+  MinLength,
+} from 'class-validator';
 
 export class CreateEmployeeRecordDto {
+  /** NIK KTP (16 digit), bukan nomor ID karyawan internal. */
+  @IsString()
+  @Matches(/^\d{16}$/, {
+    message: 'NIK KTP harus 16 digit angka',
+  })
+  nationalIdNumber: string;
+
+  /** Nomor/ kode ID karyawan di perusahaan (opsional, bukan NIK KTP). */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  employeeCode?: string;
+
   @IsString()
   @MinLength(2)
   employeeName: string;
 
-  @IsOptional()
   @IsString()
-  employeeIdNumber?: string;
+  @MinLength(2)
+  placeOfBirth: string;
 
-  @IsOptional()
-  @IsString()
-  position?: string;
-
-  @IsOptional()
   @IsDateString()
-  joinedAt?: string;
+  dateOfBirth: string;
+
+  @IsDateString()
+  joinedAt: string;
 
   @IsOptional()
   @IsDateString()
   leftAt?: string;
 
-  @IsOptional()
   @IsString()
-  conductSummary?: string;
+  @MinLength(2)
+  position: string;
 
   @IsOptional()
   @IsString()
-  violationNotes?: string;
+  conductSummary?: string;
 }
