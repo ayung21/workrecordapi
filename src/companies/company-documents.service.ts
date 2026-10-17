@@ -1,0 +1,514 @@
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { and, eq } from 'drizzle-orm';
+import { mkdir, readFile, writeFile } from 'fs/promises';
+import { extname, join } from 'path';
+import { DatabaseService } from '../database/database.service';
+import { companies, companyDocuments } from '../database/schema';
+import { JwtPayload } from '../auth/types/jwt-payload';
+import { AuditService } from '../audit/audit.service';
+import { RequestSiteVerificationDto } from './dto/request-site-verification.dto';
+import { ScheduleSiteVerificationDto } from './dto/schedule-site-verification.dto';
+import { SiteVerificationVideoService } from './site-verification-video.service';
+
+export const COMPANY_DOCUMENT_TYPES = [
+  'NIB',
+  'KTP_PENANGGUNG_JAWAB',
+  'AKTA',
+] as const;
+export type CompanyDocumentType = (typeof COMPANY_DOCUMENT_TYPES)[number];
+
+const PDF_ONLY_DOCUMENT_TYPES: CompanyDocumentType[] = ['NIB', 'AKTA'];
+
+@Injectable()
+export class CompanyDocumentsService {
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly audit: AuditService,
+    private readonly siteVerificationVideo: SiteVerificationVideoService,
+  ) {}
+
+  private get db() {
+    return this.database.db;
+  }
+
+  private uploadRoot() {
+    return process.env.UPLOAD_DIR ?? join(process.cwd(), 'uploads');
+  }
+
+  async ensureDocumentRows(companyId: string) {
+    for (const type of COMPANY_DOCUMENT_TYPES) {
+      const existing = await this.db.query.companyDocuments.findFirst({
+        where: and(
+          eq(companyDocuments.companyId, companyId),
+          eq(companyDocuments.type, type),
+        ),
+      });
+      if (!existing) {
+        await this.db.insert(companyDocuments).values({
+          companyId,
+          type,
+          status: 'MISSING',
+        });
+      }
+    }
+  }
+
+  async getVerificationStatus(companyId: string) {
+    await this.ensureDocumentRows(companyId);
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    if (!company) throw new NotFoundException();
+    const docs = await this.db
+      .select()
+      .from(companyDocuments)
+      .where(eq(companyDocuments.companyId, companyId));
+    return {
+      companyId,
+      operationalStatus: company.operationalStatus,
+      surveyStatus: company.surveyStatus,
+      verifiedAt: company.verifiedAt,
+      documents: docs.map((d) => ({
+        type: d.type,
+        status: d.status,
+        rejectReason: d.rejectReason,
+        uploadedAt: d.uploadedAt,
+        reviewedAt: d.reviewedAt,
+        hasFile: Boolean(d.filePath),
+      })),
+      canSubmitForReview: docs.every(
+        (d) => d.filePath && d.status !== 'MISSING',
+      ),
+      allApproved: docs.every((d) => d.status === 'APPROVED'),
+      siteVerification: this.mapSiteVerification(company),
+    };
+  }
+
+  private mapSiteVerification(company: typeof companies.$inferSelect) {
+    return {
+      status: company.siteVerificationStatus,
+      method: company.siteVerificationMethod,
+      contactName: company.siteVerificationContactName,
+      contactPhone: company.siteVerificationContactPhone,
+      address: company.siteVerificationAddress,
+      preferredScheduleNote: company.siteVerificationPreferredNote,
+      scheduledAt: company.siteVerificationScheduledAt,
+      meetingUrl: company.siteVerificationMeetingUrl,
+      adminNotes: company.siteVerificationAdminNotes,
+      completedAt: company.siteVerificationCompletedAt,
+      canRequest:
+        company.operationalStatus === 'UNDER_REVIEW' &&
+        company.siteVerificationStatus === 'NOT_REQUESTED',
+      video: this.siteVerificationVideo.getVerificationVideoMeta(),
+    };
+  }
+
+  async requestSiteVerification(
+    companyId: string,
+    actor: JwtPayload,
+    dto: RequestSiteVerificationDto,
+  ) {
+    this.assertCompanyMember(actor, companyId);
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    if (!company) throw new NotFoundException();
+    if (company.operationalStatus === 'ACTIVE') {
+      throw new BadRequestException('Perusahaan sudah aktif');
+    }
+    if (company.siteVerificationStatus !== 'NOT_REQUESTED') {
+      throw new BadRequestException(
+        'Permintaan verifikasi lapangan sudah dikirim',
+      );
+    }
+
+    await this.db
+      .update(companies)
+      .set({
+        siteVerificationMethod: dto.method,
+        siteVerificationStatus: 'AWAITING_SCHEDULE',
+        siteVerificationContactName: dto.contactName.trim(),
+        siteVerificationContactPhone: dto.contactPhone.trim(),
+        siteVerificationAddress: dto.address.trim(),
+        siteVerificationPreferredNote: dto.preferredScheduleNote?.trim() ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId));
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId: actor.sub,
+      companyId,
+      entityType: 'Company',
+      entityId: companyId,
+      metadata: { action: 'site_verification_request', method: dto.method },
+    });
+
+    return this.getVerificationStatus(companyId);
+  }
+
+  async scheduleSiteVerification(
+    companyId: string,
+    actorUserId: string,
+    dto: ScheduleSiteVerificationDto,
+  ) {
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    if (!company) throw new NotFoundException();
+    if (
+      company.siteVerificationStatus !== 'AWAITING_SCHEDULE' &&
+      company.siteVerificationStatus !== 'SCHEDULED'
+    ) {
+      throw new BadRequestException(
+        'Perusahaan belum mengajukan verifikasi lapangan',
+      );
+    }
+    if (
+      company.siteVerificationMethod === 'VIDEO_CALL' &&
+      !dto.meetingUrl?.trim()
+    ) {
+      throw new BadRequestException(
+        'URL meeting wajib untuk verifikasi video call',
+      );
+    }
+
+    await this.db
+      .update(companies)
+      .set({
+        siteVerificationStatus: 'SCHEDULED',
+        siteVerificationScheduledAt: new Date(dto.scheduledAt),
+        siteVerificationMeetingUrl: dto.meetingUrl?.trim() ?? null,
+        siteVerificationAdminNotes: dto.adminNotes?.trim() ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId));
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId,
+      companyId,
+      entityType: 'Company',
+      entityId: companyId,
+      metadata: { action: 'site_verification_scheduled' },
+    });
+
+    return this.getVerificationStatus(companyId);
+  }
+
+  async completeSiteVerification(companyId: string, actorUserId: string) {
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    if (!company) throw new NotFoundException();
+    if (
+      company.siteVerificationStatus !== 'SCHEDULED' &&
+      company.siteVerificationStatus !== 'AWAITING_SCHEDULE'
+    ) {
+      if (company.siteVerificationStatus === 'NOT_REQUESTED') {
+        throw new BadRequestException(
+          'Perusahaan belum mengajukan verifikasi video call atau kunjungan lokasi',
+        );
+      }
+      if (company.siteVerificationStatus === 'COMPLETED') {
+        throw new BadRequestException('Verifikasi lapangan sudah selesai');
+      }
+      throw new BadRequestException(
+        'Verifikasi lapangan belum siap ditandai selesai',
+      );
+    }
+
+    await this.db
+      .update(companies)
+      .set({
+        siteVerificationStatus: 'COMPLETED',
+        siteVerificationCompletedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId));
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId,
+      companyId,
+      entityType: 'Company',
+      entityId: companyId,
+      metadata: { action: 'site_verification_completed' },
+    });
+
+    return this.getVerificationStatus(companyId);
+  }
+
+  assertCompanyMember(actor: JwtPayload, companyId: string) {
+    if (actor.roleCode === 'OWNER') return;
+    if (actor.companyId !== companyId) {
+      throw new ForbiddenException('Akses ditolak');
+    }
+  }
+
+  private isPdfBuffer(data: Buffer): boolean {
+    return data.length >= 4 && data.subarray(0, 4).toString() === '%PDF';
+  }
+
+  private resolveUploadExtension(
+    type: CompanyDocumentType,
+    file: { buffer: Buffer; originalname: string },
+  ): string {
+    const rawExt = extname(file.originalname).toLowerCase();
+
+    if (PDF_ONLY_DOCUMENT_TYPES.includes(type)) {
+      if (rawExt !== '.pdf') {
+        throw new BadRequestException(
+          'NIB dan Akta perusahaan hanya boleh diunggah dalam format PDF',
+        );
+      }
+      if (!this.isPdfBuffer(file.buffer)) {
+        throw new BadRequestException(
+          'Berkas NIB/Akta tidak valid atau bukan PDF',
+        );
+      }
+      return '.pdf';
+    }
+
+    const allowedExt = ['.pdf', '.jpg', '.jpeg', '.png', '.webp'];
+    if (!allowedExt.includes(rawExt)) {
+      throw new BadRequestException(
+        'Format berkas tidak didukung. Gunakan PDF atau gambar (JPG, PNG, WebP).',
+      );
+    }
+    return rawExt;
+  }
+
+  async uploadDocument(
+    companyId: string,
+    type: CompanyDocumentType,
+    file: { buffer: Buffer; originalname: string },
+    actor: JwtPayload,
+  ) {
+    this.assertCompanyMember(actor, companyId);
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    if (!company) throw new NotFoundException();
+    if (company.operationalStatus === 'ACTIVE') {
+      throw new BadRequestException('Perusahaan sudah aktif');
+    }
+
+    await this.ensureDocumentRows(companyId);
+    const dir = join(this.uploadRoot(), 'companies', companyId);
+    await mkdir(dir, { recursive: true });
+    const ext = this.resolveUploadExtension(type, file);
+    const safeName = `${type}-${Date.now()}${ext}`;
+    const filePath = join(dir, safeName);
+    await writeFile(filePath, file.buffer);
+
+    const [doc] = await this.db
+      .update(companyDocuments)
+      .set({
+        filePath,
+        status: 'PENDING',
+        rejectReason: null,
+        uploadedAt: new Date(),
+        reviewedAt: null,
+        reviewedByUserId: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(companyDocuments.companyId, companyId),
+          eq(companyDocuments.type, type),
+        ),
+      )
+      .returning();
+
+    if (company.operationalStatus === 'PENDING_DOCUMENTS') {
+      await this.db
+        .update(companies)
+        .set({ updatedAt: new Date() })
+        .where(eq(companies.id, companyId));
+    }
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId: actor.sub,
+      companyId,
+      entityType: 'CompanyDocument',
+      entityId: doc.id,
+      metadata: { type, action: 'upload' },
+    });
+
+    return doc;
+  }
+
+  async submitForReview(companyId: string, actor: JwtPayload) {
+    this.assertCompanyMember(actor, companyId);
+    const status = await this.getVerificationStatus(companyId);
+    if (!status.canSubmitForReview) {
+      throw new BadRequestException(
+        'Unggah NIB, KTP penanggung jawab, dan Akta terlebih dahulu',
+      );
+    }
+    if (status.operationalStatus === 'ACTIVE') {
+      throw new BadRequestException('Perusahaan sudah aktif');
+    }
+
+    await this.db
+      .update(companies)
+      .set({
+        operationalStatus: 'UNDER_REVIEW',
+        surveyStatus: 'IN_PROGRESS',
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId));
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId: actor.sub,
+      companyId,
+      entityType: 'Company',
+      entityId: companyId,
+      metadata: { action: 'submit_for_review' },
+    });
+
+    return this.getVerificationStatus(companyId);
+  }
+
+  async reviewDocument(
+    companyId: string,
+    type: CompanyDocumentType,
+    approve: boolean,
+    actorUserId: string,
+    rejectReason?: string,
+  ) {
+    if (!approve && !rejectReason?.trim()) {
+      throw new BadRequestException('Alasan penolakan wajib diisi');
+    }
+
+    const doc = await this.db.query.companyDocuments.findFirst({
+      where: and(
+        eq(companyDocuments.companyId, companyId),
+        eq(companyDocuments.type, type),
+      ),
+    });
+    if (!doc || !doc.filePath) {
+      throw new NotFoundException('Dokumen belum diunggah');
+    }
+
+    const [updated] = await this.db
+      .update(companyDocuments)
+      .set({
+        status: approve ? 'APPROVED' : 'REJECTED',
+        rejectReason: approve ? null : rejectReason?.trim(),
+        reviewedAt: new Date(),
+        reviewedByUserId: actorUserId,
+        updatedAt: new Date(),
+      })
+      .where(eq(companyDocuments.id, doc.id))
+      .returning();
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId,
+      companyId,
+      entityType: 'CompanyDocument',
+      entityId: doc.id,
+      metadata: { type, approve, rejectReason },
+    });
+
+    return updated;
+  }
+
+  async activateCompanyIfReady(companyId: string, actorUserId: string) {
+    const status = await this.getVerificationStatus(companyId);
+    if (!status.allApproved) {
+      throw new BadRequestException(
+        'Semua dokumen harus disetujui sebelum aktivasi',
+      );
+    }
+    if (status.siteVerification.status !== 'COMPLETED') {
+      throw new BadRequestException(
+        'Verifikasi video call atau kunjungan lokasi harus diselesaikan sebelum aktivasi',
+      );
+    }
+
+    const [company] = await this.db
+      .update(companies)
+      .set({
+        operationalStatus: 'ACTIVE',
+        surveyStatus: 'VERIFIED',
+        verifiedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId))
+      .returning();
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId,
+      companyId,
+      entityType: 'Company',
+      entityId: companyId,
+      metadata: { action: 'activate' },
+    });
+
+    return company;
+  }
+
+  async getFilePath(companyId: string, type: CompanyDocumentType) {
+    const doc = await this.db.query.companyDocuments.findFirst({
+      where: and(
+        eq(companyDocuments.companyId, companyId),
+        eq(companyDocuments.type, type),
+      ),
+    });
+    if (!doc?.filePath) throw new NotFoundException();
+    return doc.filePath;
+  }
+
+  guessContentType(filePath: string, data: Buffer): string {
+    if (data.length >= 4 && data.subarray(0, 4).toString() === '%PDF') {
+      return 'application/pdf';
+    }
+    if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8) {
+      return 'image/jpeg';
+    }
+    if (
+      data.length >= 8 &&
+      data[0] === 0x89 &&
+      data[1] === 0x50 &&
+      data[2] === 0x4e &&
+      data[3] === 0x47
+    ) {
+      return 'image/png';
+    }
+    const ext = extname(filePath).toLowerCase();
+    switch (ext) {
+      case '.pdf':
+        return 'application/pdf';
+      case '.jpg':
+      case '.jpeg':
+        return 'image/jpeg';
+      case '.png':
+        return 'image/png';
+      case '.webp':
+        return 'image/webp';
+      default:
+        return 'application/octet-stream';
+    }
+  }
+
+  async readDocumentFile(companyId: string, type: CompanyDocumentType) {
+    const filePath = await this.getFilePath(companyId, type);
+    const data = await readFile(filePath);
+    return {
+      data,
+      filePath,
+      contentType: this.guessContentType(filePath, data),
+    };
+  }
+}

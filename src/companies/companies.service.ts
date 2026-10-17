@@ -1,107 +1,333 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { UserAccountType } from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import { and, count, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { DatabaseService } from '../database/database.service';
+import {
+  companies,
+  payments,
+  roles,
+  subscriptions,
+  users,
+} from '../database/schema';
 import { generatePublicLoginId, generateSecureToken } from '../common/utils/id-generator';
 import { MailService } from '../mail/mail.service';
 import { RegisterCompanyDto } from './dto/register-company.dto';
+import { COMPANY_TERMS_VERSION } from './constants';
 import { PaymentsService } from '../payments/payments.service';
 import { AuthService } from '../auth/auth.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { InviteLeadershipDto } from './dto/invite-leadership.dto';
 import { JwtPayload } from '../auth/types/jwt-payload';
 import { AuditService } from '../audit/audit.service';
+import { CompanyDocumentsService } from './company-documents.service';
+import {
+  employeeBlacklists,
+  employeeProfiles,
+  employeeRecords,
+  recordChangeRequests,
+} from '../database/schema';
+import { BlacklistsService } from '../blacklists/blacklists.service';
+import { AccessService } from '../access/access.service';
 
 @Injectable()
 export class CompaniesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly mail: MailService,
     private readonly payments: PaymentsService,
     private readonly auth: AuthService,
     private readonly subscriptions: SubscriptionsService,
     private readonly audit: AuditService,
+    private readonly companyDocuments: CompanyDocumentsService,
+    private readonly blacklists: BlacklistsService,
+    private readonly access: AccessService,
   ) {}
 
-  async register(dto: RegisterCompanyDto) {
-    const email = dto.email.toLowerCase();
-    const existing = await this.prisma.user.findUnique({ where: { email } });
-    if (existing) throw new ConflictException('Email sudah terdaftar');
+  private get db() {
+    return this.database.db;
+  }
 
-    const adminRole = await this.prisma.role.findUnique({
-      where: { code: 'COMPANY_ADMIN' },
-    });
-    if (!adminRole) {
-      throw new Error('Roles not seeded. Run: npm run prisma:seed');
+  async register(dto: RegisterCompanyDto) {
+    const termsVersion = dto.termsVersion ?? COMPANY_TERMS_VERSION;
+    if (termsVersion !== COMPANY_TERMS_VERSION) {
+      throw new BadRequestException(
+        'Versi syarat ketentuan tidak valid. Muat ulang halaman pendaftaran.',
+      );
     }
 
+    const email = dto.email.toLowerCase();
+    const partnerEmail = dto.partnerAccount.email.toLowerCase();
+    if (email === partnerEmail) {
+      throw new BadRequestException(
+        'Email akun pembayar dan akun kedua harus berbeda',
+      );
+    }
+
+    for (const addr of [email, partnerEmail]) {
+      const existing = await this.db.query.users.findFirst({
+        where: eq(users.email, addr),
+      });
+      if (existing) {
+        throw new ConflictException(`Email ${addr} sudah terdaftar`);
+      }
+    }
+
+    const adminRole = await this.db.query.roles.findFirst({
+      where: eq(roles.code, 'COMPANY_ADMIN'),
+    });
+    const leaderRole = await this.db.query.roles.findFirst({
+      where: eq(roles.code, 'COMPANY_LEADERSHIP'),
+    });
+    if (!adminRole || !leaderRole) {
+      throw new Error('Roles not seeded. Run: npm run db:seed');
+    }
+
+    const partnerIsBawahan = dto.partnerAccount.relationRole === 'BAWAHAN';
+    const primaryIsAtasan = partnerIsBawahan;
+
+    const primaryRole = primaryIsAtasan ? leaderRole : adminRole;
+    const partnerRole = primaryIsAtasan ? adminRole : leaderRole;
+    const primaryAccountType = primaryIsAtasan ? 'LEADERSHIP' : 'ADMIN';
+    const partnerAccountType = primaryIsAtasan ? 'ADMIN' : 'LEADERSHIP';
+    const primaryPrefix = primaryIsAtasan ? 'LDR' : 'ADM';
+    const partnerPrefix = primaryIsAtasan ? 'ADM' : 'LDR';
+
     const adminPublicId = await this.uniquePublicId('ADM');
+    const leaderPublicId = await this.uniquePublicId('LDR');
+    const primaryPublicId =
+      primaryPrefix === 'ADM' ? adminPublicId : leaderPublicId;
+    const partnerPublicId =
+      partnerPrefix === 'ADM' ? adminPublicId : leaderPublicId;
 
-    const passwordHash = await bcrypt.hash(dto.password, 12);
+    const primaryPasswordHash = await bcrypt.hash(dto.password, 12);
+    const partnerPasswordHash = await bcrypt.hash(generateSecureToken(), 12);
+    const termsAcceptedAt = new Date();
+    const termsAcceptance = { ...dto.terms };
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const company = await tx.company.create({
-        data: {
+    const result = await this.db.transaction(async (tx) => {
+      const [company] = await tx
+        .insert(companies)
+        .values({
           name: dto.companyName,
           companyPhone: dto.companyPhone,
           adminPublicId,
-        },
-      });
+          leaderPublicId,
+          leadershipInvitedAt: new Date(),
+          termsVersion,
+          termsAcceptedAt,
+          termsAcceptance,
+        })
+        .returning();
 
-      const adminUser = await tx.user.create({
-        data: {
-          publicLoginId: adminPublicId,
+      const [primaryUser] = await tx
+        .insert(users)
+        .values({
+          publicLoginId: primaryPublicId,
           email,
-          passwordHash,
+          passwordHash: primaryPasswordHash,
           fullName: dto.fullName,
           personalPhone: dto.personalPhone,
-          accountType: UserAccountType.ADMIN,
-          roleId: adminRole.id,
+          accountType: primaryAccountType,
+          roleId: primaryRole.id,
           companyId: company.id,
-        },
-      });
+        })
+        .returning();
 
-      return { company, adminUser };
+      await tx
+        .update(companies)
+        .set({
+          registeredByUserId: primaryUser.id,
+          updatedAt: new Date(),
+        })
+        .where(eq(companies.id, company.id));
+
+      const [partnerUser] = await tx
+        .insert(users)
+        .values({
+          publicLoginId: partnerPublicId,
+          email: partnerEmail,
+          passwordHash: partnerPasswordHash,
+          fullName: dto.partnerAccount.fullName,
+          personalPhone: dto.partnerAccount.personalPhone,
+          accountType: partnerAccountType,
+          roleId: partnerRole.id,
+          companyId: company.id,
+        })
+        .returning();
+
+      return { company, primaryUser, partnerUser };
     });
+
+    const primaryRoleLabel = primaryIsAtasan ? 'Master (Atasan)' : 'Admin (Bawahan)';
+    const partnerRoleLabel = primaryIsAtasan ? 'Admin (Bawahan)' : 'Master (Atasan)';
+
+    await this.companyDocuments.ensureDocumentRows(result.company.id);
 
     await this.mail.sendMail({
       to: email,
-      subject: 'ID Login WorkRecord — Admin',
+      subject: 'Registrasi WorkRecord — unggah dokumen perusahaan',
       html: `
-        <p>Terima kasih mendaftar di WorkRecord (platform netral verifikasi riwayat kerja).</p>
-        <p><strong>ID Admin:</strong> ${adminPublicId}</p>
-        <p>Login dapat menggunakan ID atau email (setelah verifikasi email).</p>
-        <p>Selesaikan pembayaran langganan. Setelah langganan aktif, Anda dapat mengundang akun <strong>Pimpinan</strong> dari dashboard.</p>
+        <p>Terima kasih mendaftarkan <strong>${dto.companyName}</strong> di WorkRecord.</p>
+        <p>Peran Anda: <strong>${primaryRoleLabel}</strong></p>
+        <p><strong>ID Login:</strong> ${primaryPublicId}</p>
+        <p>Akun kedua (${partnerRoleLabel}): ${partnerEmail} — akan menerima email aktivasi terpisah.</p>
+        <p>Login lalu unggah NIB, KTP penanggung jawab, dan Akta perusahaan. Setelah diverifikasi WorkRecord, Anda dapat mencari riwayat kerja berdasarkan NIK KTP karyawan.</p>
       `,
     });
 
-    const checkout = await this.payments.createSubscriptionPayment(
-      result.adminUser.id,
-      result.company.id,
-    );
+    await this.auth.requestEmailVerification(result.primaryUser.id);
 
-    await this.auth.requestEmailVerification(result.adminUser.id);
+    await this.auth.sendAccountActivation(result.partnerUser.id, {
+      publicLoginId: partnerPublicId,
+      roleLabel: partnerRoleLabel,
+    });
 
     await this.audit.log({
       action: 'COMPANY_REGISTER',
-      actorUserId: result.adminUser.id,
+      actorUserId: result.primaryUser.id,
       companyId: result.company.id,
       entityType: 'Company',
       entityId: result.company.id,
-      metadata: { adminPublicId },
+      metadata: {
+        adminPublicId,
+        leaderPublicId,
+        primaryRole: primaryAccountType,
+        partnerRole: partnerAccountType,
+        termsVersion,
+      },
     });
 
     return {
       companyId: result.company.id,
       adminPublicId,
-      checkout,
+      leaderPublicId,
+      primaryPublicId,
+      partnerPublicId,
+      primaryRole: primaryAccountType,
+      partnerRole: partnerAccountType,
       message:
-        'Registrasi berhasil. ID Admin dikirim ke email. Setelah langganan aktif, undang Pimpinan via API/dashboard.',
+        'Registrasi berhasil. Unggah dokumen perusahaan setelah login. Akun kedua menerima email aktivasi.',
+    };
+  }
+
+  async getMyCompany(actor: JwtPayload) {
+    if (!actor.companyId) {
+      throw new ForbiddenException('Bukan akun perusahaan');
+    }
+    const company = await this.findOne(actor.companyId);
+    const verification = await this.companyDocuments.getVerificationStatus(
+      actor.companyId,
+    );
+    return { ...company, verification };
+  }
+
+  async listCompanyEmployees(companyId: string, actor: JwtPayload) {
+    if (actor.roleCode !== 'OWNER' && actor.companyId !== companyId) {
+      throw new ForbiddenException();
+    }
+    await this.access.assertPortalCompanyActive(actor);
+    const rows = await this.db
+      .select({
+        record: employeeRecords,
+        nationalIdNumber: employeeProfiles.nationalIdNumber,
+      })
+      .from(employeeRecords)
+      .leftJoin(
+        employeeProfiles,
+        eq(employeeRecords.employeeProfileId, employeeProfiles.id),
+      )
+      .where(
+        and(
+          eq(employeeRecords.companyId, companyId),
+          isNull(employeeRecords.deletedAt),
+        ),
+      )
+      .orderBy(desc(employeeRecords.createdAt));
+
+    const blRows = await this.db
+      .select()
+      .from(employeeBlacklists)
+      .where(
+        and(
+          eq(employeeBlacklists.companyId, companyId),
+          eq(employeeBlacklists.status, 'ACTIVE'),
+        ),
+      );
+
+    const blByRecord = new Map(
+      blRows
+        .filter((b) => b.employeeRecordId)
+        .map((b) => [b.employeeRecordId!, b]),
+    );
+
+    const recordIds = rows.map(({ record: r }) => r.id);
+    const changeCountByRecord = new Map<string, number>();
+    if (recordIds.length) {
+      const changeRows = await this.db
+        .select({
+          employeeRecordId: recordChangeRequests.employeeRecordId,
+          total: count(),
+        })
+        .from(recordChangeRequests)
+        .where(
+          and(
+            eq(recordChangeRequests.companyId, companyId),
+            eq(recordChangeRequests.status, 'APPROVED'),
+            inArray(recordChangeRequests.employeeRecordId, recordIds),
+          ),
+        )
+        .groupBy(recordChangeRequests.employeeRecordId);
+      for (const row of changeRows) {
+        if (row.employeeRecordId) {
+          changeCountByRecord.set(row.employeeRecordId, Number(row.total));
+        }
+      }
+    }
+
+    return rows.map(({ record: r, nationalIdNumber }) => {
+      const bl = blByRecord.get(r.id);
+      return {
+        id: r.id,
+        employeeName: r.employeeName,
+        nationalIdNumber,
+        employeeIdNumber: r.employeeIdNumber,
+        position: r.position,
+        hasPhoto: Boolean(r.photoPath),
+        joinedAt: r.joinedAt,
+        leftAt: r.leftAt,
+        hasBlacklist: Boolean(bl),
+        blacklistId: bl?.id ?? null,
+        blacklistNote: bl?.note ?? null,
+        changeRevisionCount: changeCountByRecord.get(r.id) ?? 0,
+        createdAt: r.createdAt,
+      };
+    });
+  }
+
+  async disputeSpendReport(companyId: string, actor: JwtPayload) {
+    if (actor.roleCode !== 'OWNER' && actor.companyId !== companyId) {
+      throw new ForbiddenException();
+    }
+    await this.access.assertPortalCompanyActive(actor);
+    const report = await this.blacklists.spendReport(companyId);
+    return {
+      totalSpent: report.totalSpent,
+      currency: report.currency,
+      blacklists: report.blacklists,
+      disputes: report.blacklists.map((b) => ({
+        id: b.id,
+        status: b.status,
+        description: b.note,
+        employeeRecordId: b.employeeRecordId,
+        paymentId: b.paymentId,
+        createdAt: b.createdAt,
+      })),
     };
   }
 
@@ -110,8 +336,8 @@ export class CompaniesService {
     actor: JwtPayload,
     dto: InviteLeadershipDto,
   ) {
-    const company = await this.prisma.company.findUnique({
-      where: { id: companyId },
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
     });
     if (!company) throw new NotFoundException('PT tidak ditemukan');
 
@@ -121,18 +347,18 @@ export class CompaniesService {
       }
     }
 
-    const subscribed = await this.subscriptions.companyHasActiveSubscription(
-      companyId,
-    );
-    if (!subscribed) {
+    if (company.operationalStatus !== 'ACTIVE') {
       throw new ForbiddenException(
-        'Undang Pimpinan hanya setelah langganan PT aktif (bayar + survey diverifikasi)',
+        'Undang Pimpinan hanya setelah perusahaan diverifikasi dan aktif',
       );
     }
 
     if (company.leaderPublicId) {
-      const existingLeader = await this.prisma.user.findFirst({
-        where: { companyId, accountType: UserAccountType.LEADERSHIP },
+      const existingLeader = await this.db.query.users.findFirst({
+        where: and(
+          eq(users.companyId, companyId),
+          eq(users.accountType, 'LEADERSHIP'),
+        ),
       });
       if (existingLeader) {
         throw new ConflictException('Akun Pimpinan untuk PT ini sudah ada');
@@ -140,41 +366,43 @@ export class CompaniesService {
     }
 
     const leaderEmail = dto.email.toLowerCase();
-    const emailTaken = await this.prisma.user.findUnique({
-      where: { email: leaderEmail },
+    const emailTaken = await this.db.query.users.findFirst({
+      where: eq(users.email, leaderEmail),
     });
     if (emailTaken) throw new ConflictException('Email sudah digunakan');
 
-    const leaderRole = await this.prisma.role.findUnique({
-      where: { code: 'COMPANY_LEADERSHIP' },
+    const leaderRole = await this.db.query.roles.findFirst({
+      where: eq(roles.code, 'COMPANY_LEADERSHIP'),
     });
     if (!leaderRole) throw new Error('Role pimpinan belum di-seed');
 
     const leaderPublicId = await this.uniquePublicId('LDR');
-    const tempSecret = generateSecureToken();
-    const passwordHash = await bcrypt.hash(tempSecret, 12);
+    const passwordHash = await bcrypt.hash(generateSecureToken(), 12);
 
-    const leader = await this.prisma.$transaction(async (tx) => {
-      await tx.company.update({
-        where: { id: companyId },
-        data: {
+    const leader = await this.db.transaction(async (tx) => {
+      await tx
+        .update(companies)
+        .set({
           leaderPublicId,
           leadershipInvitedAt: new Date(),
-        },
-      });
+          updatedAt: new Date(),
+        })
+        .where(eq(companies.id, companyId));
 
-      return tx.user.create({
-        data: {
+      const [row] = await tx
+        .insert(users)
+        .values({
           publicLoginId: leaderPublicId,
           email: leaderEmail,
           passwordHash,
           fullName: dto.fullName,
           personalPhone: dto.personalPhone,
-          accountType: UserAccountType.LEADERSHIP,
+          accountType: 'LEADERSHIP',
           roleId: leaderRole.id,
           companyId,
-        },
-      });
+        })
+        .returning();
+      return row;
     });
 
     await this.mail.sendMail({
@@ -183,11 +411,11 @@ export class CompaniesService {
       html: `
         <p>Anda diundang sebagai <strong>Pimpinan</strong> di ${company.name} pada WorkRecord.</p>
         <p><strong>ID Login:</strong> ${leaderPublicId}</p>
-        <p>Silakan atur password melalui link yang dikirim terpisah, lalu verifikasi email.</p>
+        <p>Silakan atur password dengan kode OTP yang dikirim terpisah ke email, lalu verifikasi email.</p>
       `,
     });
 
-    await this.auth.requestPasswordReset(leaderEmail);
+    await this.auth.requestPasswordResetOtp(leaderEmail);
     await this.auth.requestEmailVerification(leader.id);
 
     await this.audit.log({
@@ -209,13 +437,14 @@ export class CompaniesService {
   private async uniquePublicId(prefix: 'ADM' | 'LDR'): Promise<string> {
     for (let i = 0; i < 10; i++) {
       const id = generatePublicLoginId(prefix);
-      const exists = await this.prisma.company.findFirst({
-        where: {
-          OR: [{ adminPublicId: id }, { leaderPublicId: id }],
-        },
+      const exists = await this.db.query.companies.findFirst({
+        where: or(
+          eq(companies.adminPublicId, id),
+          eq(companies.leaderPublicId, id),
+        ),
       });
-      const userExists = await this.prisma.user.findUnique({
-        where: { publicLoginId: id },
+      const userExists = await this.db.query.users.findFirst({
+        where: eq(users.publicLoginId, id),
       });
       if (!exists && !userExists) return id;
     }
@@ -223,13 +452,18 @@ export class CompaniesService {
   }
 
   async findOne(id: string) {
-    const company = await this.prisma.company.findUnique({ where: { id } });
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, id),
+    });
     if (!company) throw new NotFoundException();
     return company;
   }
 
   async listForOwner() {
-    return this.prisma.company.findMany({ orderBy: { createdAt: 'desc' } });
+    return this.db
+      .select()
+      .from(companies)
+      .orderBy(desc(companies.createdAt));
   }
 
   async updateSurvey(
@@ -238,14 +472,16 @@ export class CompaniesService {
     notes?: string,
     actorUserId?: string,
   ) {
-    const company = await this.prisma.company.update({
-      where: { id: companyId },
-      data: {
+    const [company] = await this.db
+      .update(companies)
+      .set({
         surveyStatus: status,
         surveyNotes: notes,
         verifiedAt: status === 'VERIFIED' ? new Date() : null,
-      },
-    });
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId))
+      .returning();
 
     await this.audit.log({
       action: 'COMPANY_SURVEY_UPDATE',
@@ -257,25 +493,28 @@ export class CompaniesService {
     });
 
     if (status === 'VERIFIED') {
-      const pendingSub = await this.prisma.subscription.findFirst({
-        where: {
-          companyId,
-          status: 'PENDING_SURVEY',
-        },
-        orderBy: { createdAt: 'desc' },
-      });
+      const [pendingSub] = await this.db
+        .select()
+        .from(subscriptions)
+        .where(
+          and(
+            eq(subscriptions.companyId, companyId),
+            eq(subscriptions.status, 'PENDING_SURVEY'),
+          ),
+        )
+        .orderBy(desc(subscriptions.createdAt))
+        .limit(1);
       if (pendingSub) {
-        const meta = pendingSub.paymentId
-          ? (
-              await this.prisma.payment.findUnique({
-                where: { id: pendingSub.paymentId },
-              })
-            )?.metadata
-          : null;
-        const months =
-          meta && typeof meta === 'object' && meta !== null && 'months' in meta
-            ? Number((meta as { months: number }).months)
-            : 1;
+        let months = 1;
+        if (pendingSub.paymentId) {
+          const pay = await this.db.query.payments.findFirst({
+            where: eq(payments.id, pendingSub.paymentId),
+          });
+          const meta = pay?.metadata;
+          if (meta && typeof meta === 'object' && meta !== null && 'months' in meta) {
+            months = Number((meta as { months: number }).months);
+          }
+        }
         const activated = await this.subscriptions.activateAfterSurvey(
           pendingSub.id,
           months,
@@ -289,14 +528,17 @@ export class CompaniesService {
           metadata: { months },
         });
 
-        const admin = await this.prisma.user.findFirst({
-          where: { companyId, accountType: UserAccountType.ADMIN },
+        const admin = await this.db.query.users.findFirst({
+          where: and(
+            eq(users.companyId, companyId),
+            eq(users.accountType, 'ADMIN'),
+          ),
         });
         if (admin) {
           await this.mail.sendMail({
             to: admin.email,
-            subject: 'Langganan aktif — undang Pimpinan',
-            html: `<p>Langganan WorkRecord untuk ${company.name} sudah aktif.</p><p>Silakan undang akun Pimpinan melalui menu perusahaan agar approval record dapat berjalan.</p>`,
+            subject: 'Langganan aktif — WorkRecord siap digunakan',
+            html: `<p>Langganan WorkRecord untuk ${company.name} sudah aktif.</p><p>Pastikan Admin dan Master telah mengaktifkan akun masing-masing agar alur pembuatan dan persetujuan record dapat berjalan.</p>`,
           });
         }
       }

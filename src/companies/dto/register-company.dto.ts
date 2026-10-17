@@ -1,4 +1,14 @@
-import { IsEmail, IsString, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsEmail,
+  IsOptional,
+  IsString,
+  MinLength,
+  ValidateNested,
+} from 'class-validator';
+import { COMPANY_TERMS_VERSION } from '../constants';
+import { CompanyTermsAcceptanceDto } from './company-terms-acceptance.dto';
+import { PartnerAccountDto } from './partner-account.dto';
 
 export class RegisterCompanyDto {
   @IsString()
@@ -22,4 +32,16 @@ export class RegisterCompanyDto {
 
   @IsString()
   personalPhone: string;
+
+  @ValidateNested()
+  @Type(() => PartnerAccountDto)
+  partnerAccount: PartnerAccountDto;
+
+  @ValidateNested()
+  @Type(() => CompanyTermsAcceptanceDto)
+  terms: CompanyTermsAcceptanceDto;
+
+  @IsOptional()
+  @IsString()
+  termsVersion?: string = COMPANY_TERMS_VERSION;
 }
