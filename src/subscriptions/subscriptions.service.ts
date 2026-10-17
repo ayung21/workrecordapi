@@ -1,37 +1,44 @@
 import { Injectable } from '@nestjs/common';
-import { SubscriptionStatus } from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import { and, eq, gte, lte } from 'drizzle-orm';
+import { DatabaseService } from '../database/database.service';
+import { companies, subscriptions } from '../database/schema';
 
 @Injectable()
 export class SubscriptionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly database: DatabaseService) {}
+
+  private get db() {
+    return this.database.db;
+  }
 
   async createPending(userId: string, companyId: string, paymentId: string) {
-    return this.prisma.subscription.create({
-      data: {
+    const [row] = await this.db
+      .insert(subscriptions)
+      .values({
         userId,
         companyId,
         paymentId,
-        status: SubscriptionStatus.PENDING_PAYMENT,
-      },
-    });
+        status: 'PENDING_PAYMENT',
+      })
+      .returning();
+    return row;
   }
 
   async onPaymentSuccess(paymentId: string) {
-    const sub = await this.prisma.subscription.findFirst({
-      where: { paymentId },
+    const sub = await this.db.query.subscriptions.findFirst({
+      where: eq(subscriptions.paymentId, paymentId),
     });
     if (!sub) return;
 
-    await this.prisma.subscription.update({
-      where: { id: sub.id },
-      data: { status: SubscriptionStatus.PENDING_SURVEY },
-    });
+    await this.db
+      .update(subscriptions)
+      .set({ status: 'PENDING_SURVEY', updatedAt: new Date() })
+      .where(eq(subscriptions.id, sub.id));
 
-    await this.prisma.company.update({
-      where: { id: sub.companyId },
-      data: { surveyStatus: 'IN_PROGRESS' },
-    });
+    await this.db
+      .update(companies)
+      .set({ surveyStatus: 'IN_PROGRESS', updatedAt: new Date() })
+      .where(eq(companies.id, sub.companyId));
   }
 
   async activateAfterSurvey(subscriptionId: string, months = 1) {
@@ -39,26 +46,29 @@ export class SubscriptionsService {
     const ends = new Date(now);
     ends.setMonth(ends.getMonth() + months);
 
-    return this.prisma.subscription.update({
-      where: { id: subscriptionId },
-      data: {
-        status: SubscriptionStatus.ACTIVE,
+    const [row] = await this.db
+      .update(subscriptions)
+      .set({
+        status: 'ACTIVE',
         startsAt: now,
         endsAt: ends,
-      },
-    });
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.id, subscriptionId))
+      .returning();
+    return row;
   }
 
   async getActiveSubscription(userId: string, companyId: string) {
     const now = new Date();
-    return this.prisma.subscription.findFirst({
-      where: {
-        userId,
-        companyId,
-        status: SubscriptionStatus.ACTIVE,
-        startsAt: { lte: now },
-        endsAt: { gte: now },
-      },
+    return this.db.query.subscriptions.findFirst({
+      where: and(
+        eq(subscriptions.userId, userId),
+        eq(subscriptions.companyId, companyId),
+        eq(subscriptions.status, 'ACTIVE'),
+        lte(subscriptions.startsAt, now),
+        gte(subscriptions.endsAt, now),
+      ),
     });
   }
 
@@ -67,16 +77,15 @@ export class SubscriptionsService {
     return !!sub;
   }
 
-  /** Langganan aktif tingkat perusahaan (siapa pun admin yang membayar). */
   async companyHasActiveSubscription(companyId: string) {
     const now = new Date();
-    const sub = await this.prisma.subscription.findFirst({
-      where: {
-        companyId,
-        status: SubscriptionStatus.ACTIVE,
-        startsAt: { lte: now },
-        endsAt: { gte: now },
-      },
+    const sub = await this.db.query.subscriptions.findFirst({
+      where: and(
+        eq(subscriptions.companyId, companyId),
+        eq(subscriptions.status, 'ACTIVE'),
+        lte(subscriptions.startsAt, now),
+        gte(subscriptions.endsAt, now),
+      ),
     });
     return !!sub;
   }

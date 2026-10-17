@@ -1,7 +1,7 @@
-import { ViewDurationUnit } from '@prisma/client';
+import { ViewDurationUnit, viewDurationUnits } from '../../database/enums';
 import {
   IsEmail,
-  IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsUUID,
@@ -19,7 +19,7 @@ export class CreateViewAccessDto {
   @IsUUID()
   employeeRecordId?: string;
 
-  @IsEnum(ViewDurationUnit)
+  @IsIn([...viewDurationUnits])
   durationUnit: ViewDurationUnit;
 
   @IsInt()

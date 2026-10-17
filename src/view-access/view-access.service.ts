@@ -1,11 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  PaymentType,
-  ViewAccessScope,
-  ViewDurationUnit,
-} from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import { and, eq, gte } from 'drizzle-orm';
+import { ViewDurationUnit } from '../database/enums';
+import { DatabaseService } from '../database/database.service';
+import { payments, viewAccessGrants } from '../database/schema';
 import { MailService } from '../mail/mail.service';
 import { generateSecureToken } from '../common/utils/id-generator';
 import { hashToken } from '../common/utils/hash';
@@ -14,44 +12,46 @@ import { AuditService } from '../audit/audit.service';
 @Injectable()
 export class ViewAccessService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly mail: MailService,
     private readonly config: ConfigService,
     private readonly audit: AuditService,
   ) {}
 
+  private get db() {
+    return this.database.db;
+  }
+
   async onPaymentSuccess(paymentId: string) {
-    const payment = await this.prisma.payment.findUniqueOrThrow({
-      where: { id: paymentId },
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
     });
-    if (payment.type !== PaymentType.VIEW_ACCESS || !payment.metadata) return;
+    if (!payment || payment.type !== 'VIEW_ACCESS' || !payment.metadata) {
+      return;
+    }
 
     const meta = payment.metadata as Record<string, unknown>;
     const email = String(meta.email);
     const durationUnit = meta.durationUnit as ViewDurationUnit;
     const durationValue = Number(meta.durationValue);
-    const scope = meta.scope as ViewAccessScope;
+    const scope = meta.scope as 'SINGLE_EMPLOYEE' | 'ALL_COMPANY';
     const employeeRecordId = meta.employeeRecordId as string | undefined;
 
     const rawToken = generateSecureToken();
     const endsAt = this.addDuration(new Date(), durationUnit, durationValue);
 
-    await this.prisma.viewAccessGrant.create({
-      data: {
-        tokenHash: hashToken(rawToken),
-        email,
-        userId: payment.userId,
-        paymentId: payment.id,
-        scope,
-        companyId: payment.companyId!,
-        employeeRecordId:
-          scope === ViewAccessScope.SINGLE_EMPLOYEE
-            ? employeeRecordId
-            : undefined,
-        durationUnit,
-        durationValue,
-        endsAt,
-      },
+    await this.db.insert(viewAccessGrants).values({
+      tokenHash: hashToken(rawToken),
+      email,
+      userId: payment.userId,
+      paymentId: payment.id,
+      scope,
+      companyId: payment.companyId!,
+      employeeRecordId:
+        scope === 'SINGLE_EMPLOYEE' ? employeeRecordId : undefined,
+      durationUnit,
+      durationValue,
+      endsAt,
     });
 
     const appUrl = this.config.get<string>('APP_URL', 'http://localhost:3000');
@@ -81,13 +81,13 @@ export class ViewAccessService {
   ): Date {
     const d = new Date(from);
     switch (unit) {
-      case ViewDurationUnit.HOUR:
+      case 'HOUR':
         d.setHours(d.getHours() + value);
         break;
-      case ViewDurationUnit.DAY:
+      case 'DAY':
         d.setDate(d.getDate() + value);
         break;
-      case ViewDurationUnit.MONTH:
+      case 'MONTH':
         d.setMonth(d.getMonth() + value);
         break;
     }
@@ -95,8 +95,8 @@ export class ViewAccessService {
   }
 
   async resolveToken(token: string) {
-    const grant = await this.prisma.viewAccessGrant.findUnique({
-      where: { tokenHash: hashToken(token) },
+    const grant = await this.db.query.viewAccessGrants.findFirst({
+      where: eq(viewAccessGrants.tokenHash, hashToken(token)),
     });
     if (!grant || grant.endsAt < new Date()) return null;
     return grant;
@@ -104,8 +104,11 @@ export class ViewAccessService {
 
   async listGrantsForUser(userId: string) {
     const now = new Date();
-    return this.prisma.viewAccessGrant.findMany({
-      where: { userId, endsAt: { gte: now } },
-    });
+    return this.db
+      .select()
+      .from(viewAccessGrants)
+      .where(
+        and(eq(viewAccessGrants.userId, userId), gte(viewAccessGrants.endsAt, now)),
+      );
   }
 }
