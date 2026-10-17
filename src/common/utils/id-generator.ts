@@ -15,3 +15,8 @@ export function generatePublicLoginId(prefix: 'ADM' | 'LDR' | 'USR'): string {
 export function generateSecureToken(): string {
   return randomBytes(32).toString('hex');
 }
+
+export function generateWorkRecordPublicId(): string {
+  const n = randomBytes(4).readUInt32BE(0) % 100_000_000;
+  return `WR-${String(n).padStart(8, '0')}`;
+}
