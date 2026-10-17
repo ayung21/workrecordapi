@@ -1,6 +1,8 @@
-import { IsEmail } from 'class-validator';
+import { IsString, MinLength } from 'class-validator';
 
 export class ForgotPasswordDto {
-  @IsEmail()
-  email: string;
+  /** ID login atau email (sama seperti form login). */
+  @IsString()
+  @MinLength(3)
+  login: string;
 }
