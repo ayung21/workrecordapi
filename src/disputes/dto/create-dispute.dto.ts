@@ -14,4 +14,7 @@ export class CreateDisputeDto {
   @IsString()
   @MinLength(20)
   description: string;
+
+  @IsUUID()
+  paymentId: string;
 }

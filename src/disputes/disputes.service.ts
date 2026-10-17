@@ -1,6 +1,12 @@
-import { Injectable } from '@nestjs/common';
-import { DisputeStatus } from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
+import { desc, eq, inArray } from 'drizzle-orm';
+import { DisputeStatus } from '../database/enums';
+import { DatabaseService } from '../database/database.service';
+import { disputes, payments } from '../database/schema';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 import { MailService } from '../mail/mail.service';
 import { AuditService } from '../audit/audit.service';
@@ -8,22 +14,47 @@ import { AuditService } from '../audit/audit.service';
 @Injectable()
 export class DisputesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly mail: MailService,
     private readonly audit: AuditService,
   ) {}
 
+  private get db() {
+    return this.database.db;
+  }
+
   async create(dto: CreateDisputeDto, reporterUserId?: string) {
-    const dispute = await this.prisma.dispute.create({
-      data: {
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, dto.paymentId),
+    });
+    if (!payment || payment.type !== 'DISPUTE' || payment.status !== 'PAID') {
+      throw new BadRequestException(
+        'Pembayaran sanggahan belum selesai atau tidak valid',
+      );
+    }
+    if (payment.companyId !== dto.companyId) {
+      throw new ForbiddenException('Pembayaran tidak sesuai perusahaan');
+    }
+
+    const used = await this.db.query.disputes.findFirst({
+      where: eq(disputes.paymentId, dto.paymentId),
+    });
+    if (used) {
+      throw new BadRequestException('Pembayaran sudah digunakan');
+    }
+
+    const [dispute] = await this.db
+      .insert(disputes)
+      .values({
         companyId: dto.companyId,
         employeeRecordId: dto.employeeRecordId,
         reporterEmail: dto.reporterEmail,
         reporterUserId,
         description: dto.description,
-        status: DisputeStatus.OPEN,
-      },
-    });
+        paymentId: dto.paymentId,
+        status: 'OPEN',
+      })
+      .returning();
 
     await this.audit.log({
       action: 'DISPUTE_CREATED',
@@ -43,10 +74,11 @@ export class DisputesService {
   }
 
   async listOpen() {
-    return this.prisma.dispute.findMany({
-      where: { status: { in: ['OPEN', 'INVESTIGATING'] } },
-      orderBy: { createdAt: 'desc' },
-    });
+    return this.db
+      .select()
+      .from(disputes)
+      .where(inArray(disputes.status, ['OPEN', 'INVESTIGATING']))
+      .orderBy(desc(disputes.createdAt));
   }
 
   async updateStatus(
@@ -55,10 +87,11 @@ export class DisputesService {
     resolutionNotes?: string,
     actorUserId?: string,
   ) {
-    const dispute = await this.prisma.dispute.update({
-      where: { id },
-      data: { status, resolutionNotes },
-    });
+    const [dispute] = await this.db
+      .update(disputes)
+      .set({ status, resolutionNotes, updatedAt: new Date() })
+      .where(eq(disputes.id, id))
+      .returning();
     await this.audit.log({
       action: 'DISPUTE_STATUS_UPDATE',
       actorUserId,

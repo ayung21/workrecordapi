@@ -1,8 +1,8 @@
-import { DisputeStatus } from '@prisma/client';
-import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { DisputeStatus, disputeStatuses } from '../../database/enums';
+import { IsIn, IsOptional, IsString } from 'class-validator';
 
 export class UpdateDisputeStatusDto {
-  @IsEnum(DisputeStatus)
+  @IsIn([...disputeStatuses])
   status: DisputeStatus;
 
   @IsOptional()

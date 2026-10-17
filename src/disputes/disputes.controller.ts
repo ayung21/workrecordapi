@@ -1,9 +1,18 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { DisputesService } from './disputes.service';
+import { PaymentsService } from '../payments/payments.service';
+import { CreateDisputeCheckoutDto } from './dto/create-dispute-checkout.dto';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
-import { Public } from '../common/decorators/public.decorator';
-import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtPayload } from '../auth/types/jwt-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -14,13 +23,35 @@ import { UpdateDisputeStatusDto } from './dto/update-dispute-status.dto';
 @ApiTags('disputes')
 @Controller('disputes')
 export class DisputesController {
-  constructor(private readonly disputes: DisputesService) {}
+  constructor(
+    private readonly disputes: DisputesService,
+    private readonly payments: PaymentsService,
+  ) {}
 
-  @Public()
-  @UseGuards(OptionalJwtAuthGuard)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Post('checkout')
+  checkout(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CreateDisputeCheckoutDto,
+  ) {
+    if (!user.companyId) {
+      throw new ForbiddenException('Hanya akun perusahaan');
+    }
+    return this.payments.createDisputePayment({
+      userId: user.sub,
+      companyId: user.companyId,
+      employeeRecordId: dto.employeeRecordId,
+      email: dto.email,
+      voucherCode: dto.voucherCode,
+    });
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
   @Post()
-  create(@Body() dto: CreateDisputeDto, @CurrentUser() user?: JwtPayload) {
-    return this.disputes.create(dto, user?.sub);
+  create(@Body() dto: CreateDisputeDto, @CurrentUser() user: JwtPayload) {
+    return this.disputes.create(dto, user.sub);
   }
 
   @ApiBearerAuth()
