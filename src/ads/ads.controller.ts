@@ -5,8 +5,14 @@ import {
   Param,
   Patch,
   Post,
+  Query,
+  Res,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -26,8 +32,17 @@ export class AdsController {
 
   @Public()
   @Get('active')
-  listActive() {
-    return this.ads.listActivePublic();
+  listActive(@Query('placement') placement?: string) {
+    return this.ads.listActivePublic(placement);
+  }
+
+  @Public()
+  @Get(':id/banner')
+  async banner(@Param('id') id: string, @Res() res: Response) {
+    const { data, mime } = await this.ads.readBannerFile(id);
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(data);
   }
 
   @ApiBearerAuth()
@@ -52,6 +67,19 @@ export class AdsController {
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdateAdDto) {
     return this.ads.update(id, dto);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequireRoles(PLATFORM_OWNER_ROLE)
+  @Post(':id/banner')
+  @UseInterceptors(FileInterceptor('banner'))
+  uploadBanner(
+    @Param('id') id: string,
+    @UploadedFile()
+    file: { buffer: Buffer; mimetype: string; size?: number },
+  ) {
+    return this.ads.uploadBannerImage(id, file);
   }
 
   @ApiBearerAuth()
