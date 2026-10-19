@@ -20,3 +20,10 @@ export function generateWorkRecordPublicId(): string {
   const n = randomBytes(4).readUInt32BE(0) % 100_000_000;
   return `WR-${String(n).padStart(8, '0')}`;
 }
+
+/** ID tampilan sertifikat member perusahaan, mis. WR-2026-000123 */
+export function generateMemberCertificateId(): string {
+  const year = new Date().getFullYear();
+  const n = randomBytes(3).readUIntBE(0, 3) % 1_000_000;
+  return `WR-${year}-${String(n).padStart(6, '0')}`;
+}

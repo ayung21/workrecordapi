@@ -54,6 +54,12 @@ export class CompaniesController {
   }
 
   @Public()
+  @Get('member-verify/:token')
+  publicMemberVerify(@Param('token') token: string) {
+    return this.documents.getPublicMemberVerification(token);
+  }
+
+  @Public()
   @Get(':id/public')
   findPublic(@Param('id') id: string) {
     return this.companies.findOne(id);

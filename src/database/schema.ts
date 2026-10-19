@@ -206,6 +206,11 @@ export const companies = pgTable('Company', {
     mode: 'date',
   }),
   isActive: boolean('isActive').notNull().default(true),
+  memberCertificateId: text('memberCertificateId'),
+  memberVerifyToken: text('memberVerifyToken'),
+  memberCertificateExpiresAt: timestamp('memberCertificateExpiresAt', {
+    mode: 'date',
+  }),
   createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
   updatedAt: timestamp('updatedAt', { mode: 'date' }).notNull().defaultNow(),
 });

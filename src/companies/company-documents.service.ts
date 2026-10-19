@@ -5,6 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
+import {
+  generateMemberCertificateId,
+  generateSecureToken,
+} from '../common/utils/id-generator';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { extname, join } from 'path';
 import { DatabaseService } from '../database/database.service';
@@ -68,11 +72,17 @@ export class CompanyDocumentsService {
       .select()
       .from(companyDocuments)
       .where(eq(companyDocuments.companyId, companyId));
+    const allApproved = docs.every((d) => d.status === 'APPROVED');
+    const activeCompany =
+      company.operationalStatus === 'ACTIVE' && allApproved
+        ? await this.ensureMemberCertificate(companyId)
+        : company;
+
     return {
       companyId,
-      operationalStatus: company.operationalStatus,
-      surveyStatus: company.surveyStatus,
-      verifiedAt: company.verifiedAt,
+      operationalStatus: activeCompany.operationalStatus,
+      surveyStatus: activeCompany.surveyStatus,
+      verifiedAt: activeCompany.verifiedAt,
       documents: docs.map((d) => ({
         type: d.type,
         status: d.status,
@@ -84,8 +94,120 @@ export class CompanyDocumentsService {
       canSubmitForReview: docs.every(
         (d) => d.filePath && d.status !== 'MISSING',
       ),
-      allApproved: docs.every((d) => d.status === 'APPROVED'),
-      siteVerification: this.mapSiteVerification(company),
+      allApproved,
+      siteVerification: this.mapSiteVerification(activeCompany),
+      memberCertificate: this.mapMemberCertificate(activeCompany, allApproved),
+    };
+  }
+
+  private mapMemberCertificate(
+    company: typeof companies.$inferSelect,
+    allApproved: boolean,
+  ) {
+    if (
+      company.operationalStatus !== 'ACTIVE' ||
+      !allApproved ||
+      !company.memberVerifyToken ||
+      !company.memberCertificateId
+    ) {
+      return null;
+    }
+    const joinedAt = company.verifiedAt ?? company.createdAt;
+    return {
+      memberId: company.memberCertificateId,
+      verifyToken: company.memberVerifyToken,
+      validUntil: company.memberCertificateExpiresAt,
+      joinedAt,
+      lastVerifiedAt: company.verifiedAt ?? joinedAt,
+      domicile: this.inferDomicile(company),
+      canDownload: true,
+    };
+  }
+
+  private inferDomicile(company: typeof companies.$inferSelect): string | null {
+    const raw = company.siteVerificationAddress?.trim();
+    if (!raw) return null;
+    const parts = raw
+      .split(/[,;\n]/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (parts.length >= 2) {
+      return parts.slice(-2).join(', ');
+    }
+    return raw;
+  }
+
+  private async uniqueMemberCertificateId(): Promise<string> {
+    for (let i = 0; i < 12; i++) {
+      const id = generateMemberCertificateId();
+      const exists = await this.db.query.companies.findFirst({
+        where: eq(companies.memberCertificateId, id),
+      });
+      if (!exists) return id;
+    }
+    throw new BadRequestException('Gagal membuat Member ID');
+  }
+
+  async ensureMemberCertificate(companyId: string) {
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    if (!company) throw new NotFoundException();
+    if (company.operationalStatus !== 'ACTIVE') return company;
+    if (company.memberVerifyToken && company.memberCertificateId) {
+      return company;
+    }
+
+    const memberCertificateId = await this.uniqueMemberCertificateId();
+    const memberVerifyToken = generateSecureToken();
+    const joinedAt = company.verifiedAt ?? new Date();
+    const validUntil = new Date(joinedAt);
+    validUntil.setFullYear(validUntil.getFullYear() + 1);
+
+    const [updated] = await this.db
+      .update(companies)
+      .set({
+        memberCertificateId,
+        memberVerifyToken,
+        memberCertificateExpiresAt: validUntil,
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId))
+      .returning();
+
+    return updated;
+  }
+
+  async getPublicMemberVerification(token: string) {
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.memberVerifyToken, token),
+    });
+    if (!company || company.operationalStatus !== 'ACTIVE') {
+      throw new NotFoundException('Keanggotaan tidak ditemukan atau tidak aktif');
+    }
+
+    const status = await this.getVerificationStatus(company.id);
+    if (!status.allApproved) {
+      throw new NotFoundException('Keanggotaan belum lengkap');
+    }
+
+    const joinedAt = company.verifiedAt ?? company.createdAt;
+    const validUntil =
+      company.memberCertificateExpiresAt ??
+      new Date(new Date(joinedAt).setFullYear(joinedAt.getFullYear() + 1));
+
+    return {
+      companyName: company.name,
+      memberId: company.memberCertificateId,
+      verifyToken: company.memberVerifyToken,
+      membershipStatus: company.isActive ? 'ACTIVE' : 'SUSPENDED',
+      verificationStatus: 'VERIFIED',
+      memberCategory: 'Corporate Member',
+      businessField: null as string | null,
+      domicile: this.inferDomicile(company),
+      joinedAt,
+      validUntil,
+      lastVerifiedAt: company.verifiedAt ?? joinedAt,
     };
   }
 
@@ -456,7 +578,7 @@ export class CompanyDocumentsService {
       metadata: { action: 'activate' },
     });
 
-    return company;
+    return this.ensureMemberCertificate(companyId);
   }
 
   async getFilePath(companyId: string, type: CompanyDocumentType) {
