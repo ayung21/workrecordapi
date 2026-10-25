@@ -23,6 +23,10 @@ import { AuditService } from '../audit/audit.service';
 import { BlacklistsService } from '../blacklists/blacklists.service';
 import { compressUploadedImage } from '../common/utils/compress-image';
 import { generateWorkRecordPublicId } from '../common/utils/id-generator';
+import {
+  parseDateOnlyField,
+  parseOptionalDateOnlyField,
+} from '../common/utils/parse-date-only';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
@@ -67,7 +71,7 @@ export class EmployeeRecordsService {
     const existing = await this.db.query.employeeProfiles.findFirst({
       where: eq(employeeProfiles.nationalIdNumber, nik),
     });
-    const dob = new Date(input.dateOfBirth);
+    const dob = parseDateOnlyField(input.dateOfBirth, 'Tanggal lahir');
     const place = input.placeOfBirth.trim();
     if (existing) {
       await this.db
@@ -516,6 +520,16 @@ export class EmployeeRecordsService {
       dateOfBirth: dto.dateOfBirth,
     });
     const employeeCode = dto.employeeCode?.trim() || null;
+    const joinedAt = parseDateOnlyField(dto.joinedAt, 'Tanggal mulai kerja');
+    const leftAt = parseOptionalDateOnlyField(
+      dto.leftAt,
+      'Tanggal selesai kerja',
+    );
+    if (leftAt && leftAt < joinedAt) {
+      throw new BadRequestException(
+        'Tanggal selesai kerja tidak boleh sebelum tanggal mulai',
+      );
+    }
 
     const [created] = await this.db
       .insert(employeeRecords)
@@ -526,8 +540,8 @@ export class EmployeeRecordsService {
         employeeIdNumber: employeeCode,
         position: dto.position.trim(),
         conductSummary: dto.conductSummary,
-        joinedAt: new Date(dto.joinedAt),
-        leftAt: dto.leftAt ? new Date(dto.leftAt) : null,
+        joinedAt,
+        leftAt,
         isPublicPreview: false,
       })
       .returning();
@@ -694,7 +708,7 @@ export class EmployeeRecordsService {
               fullName: dto.employeeName ?? profile.fullName,
               placeOfBirth: dto.placeOfBirth?.trim() ?? profile.placeOfBirth,
               dateOfBirth: dto.dateOfBirth
-                ? new Date(dto.dateOfBirth)
+                ? parseDateOnlyField(dto.dateOfBirth, 'Tanggal lahir')
                 : profile.dateOfBirth,
               updatedAt: new Date(),
             })
@@ -728,9 +742,14 @@ export class EmployeeRecordsService {
     if (dto.violationNotes !== undefined) {
       patch.violationNotes = dto.violationNotes;
     }
-    if (dto.joinedAt !== undefined) patch.joinedAt = new Date(dto.joinedAt);
+    if (dto.joinedAt !== undefined) {
+      patch.joinedAt = parseDateOnlyField(dto.joinedAt, 'Tanggal mulai kerja');
+    }
     if (dto.leftAt !== undefined) {
-      patch.leftAt = dto.leftAt ? new Date(dto.leftAt) : null;
+      patch.leftAt = parseOptionalDateOnlyField(
+        dto.leftAt,
+        'Tanggal selesai kerja',
+      );
     }
 
     await this.db
@@ -829,6 +848,16 @@ export class EmployeeRecordsService {
         dateOfBirth: p.dateOfBirth,
       });
       const employeeCode = p.employeeCode?.trim() || null;
+      const joinedAt = parseDateOnlyField(p.joinedAt, 'Tanggal mulai kerja');
+      const leftAt = parseOptionalDateOnlyField(
+        p.leftAt,
+        'Tanggal selesai kerja',
+      );
+      if (leftAt && leftAt < joinedAt) {
+        throw new BadRequestException(
+          'Tanggal selesai kerja tidak boleh sebelum tanggal mulai',
+        );
+      }
       const [created] = await this.db
         .insert(employeeRecords)
         .values({
@@ -838,8 +867,8 @@ export class EmployeeRecordsService {
           employeeIdNumber: employeeCode,
           position: p.position,
           conductSummary: p.conductSummary,
-          joinedAt: new Date(p.joinedAt),
-          leftAt: p.leftAt ? new Date(p.leftAt) : null,
+          joinedAt,
+          leftAt,
           isPublicPreview: false,
         })
         .returning();

@@ -188,7 +188,7 @@ export class EmployeeRecordsController {
         dateOfBirth,
         joinedAt,
         position,
-        leftAt: leftAt || undefined,
+        leftAt: leftAt?.trim() ? leftAt.trim() : undefined,
         conductSummary,
       },
       photo,
