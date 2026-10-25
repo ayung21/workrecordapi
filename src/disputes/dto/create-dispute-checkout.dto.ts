@@ -11,4 +11,8 @@ export class CreateDisputeCheckoutDto {
   @IsOptional()
   @IsString()
   voucherCode?: string;
+
+  @IsOptional()
+  @IsUUID()
+  manualBankAccountId?: string;
 }

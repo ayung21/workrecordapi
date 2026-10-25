@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -7,6 +7,7 @@ import { PLATFORM_OWNER_ROLE } from '../auth/constants/platform-roles';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtPayload } from '../auth/types/jwt-payload';
 import { PlatformService } from './platform.service';
+import { PaymentsService } from '../payments/payments.service';
 import { AuditAction, PaymentType } from '../database/enums';
 
 @ApiTags('platform')
@@ -15,7 +16,10 @@ import { AuditAction, PaymentType } from '../database/enums';
 @RequireRoles(PLATFORM_OWNER_ROLE)
 @Controller('platform')
 export class PlatformController {
-  constructor(private readonly platform: PlatformService) {}
+  constructor(
+    private readonly platform: PlatformService,
+    private readonly payments: PaymentsService,
+  ) {}
 
   @Get('employee-records')
   listEmployeeRecords(
@@ -38,6 +42,14 @@ export class PlatformController {
       limit ? Number(limit) : undefined,
       type as PaymentType | undefined,
     );
+  }
+
+  @Post('payments/:id/approve-manual')
+  approveManualPayment(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.payments.approveManualPayment(id, user.sub);
   }
 
   @Get('blacklists')

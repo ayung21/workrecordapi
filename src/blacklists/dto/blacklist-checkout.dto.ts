@@ -20,4 +20,8 @@ export class BlacklistCheckoutDto {
   @IsOptional()
   @IsString()
   voucherCode?: string;
+
+  @IsOptional()
+  @IsUUID()
+  manualBankAccountId?: string;
 }

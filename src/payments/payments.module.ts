@@ -3,6 +3,7 @@ import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
 import { MidtransGateway } from './midtrans.gateway';
 import { BimaSaktiGateway } from './bimasakti.gateway';
+import { ManualGateway } from './manual.gateway';
 import { PaymentGatewayFactory } from './payment-gateway.factory';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { ViewAccessModule } from '../view-access/view-access.module';
@@ -22,6 +23,7 @@ import { AdsModule } from '../ads/ads.module';
     PaymentsService,
     MidtransGateway,
     BimaSaktiGateway,
+    ManualGateway,
     PaymentGatewayFactory,
   ],
   controllers: [PaymentsController],

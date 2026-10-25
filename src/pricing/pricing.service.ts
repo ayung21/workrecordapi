@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { asc, desc, eq } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
@@ -10,6 +11,15 @@ import { adPricingPackages, platformPricing } from '../database/schema';
 import { AdPlacementSlot, adPlacementSlots } from '../database/enums';
 
 const SERVICE_FEES_KEY = 'service_fees';
+const MANUAL_PAYMENT_BANK_KEY = 'manual_payment_bank';
+
+export type ManualPaymentBankAccount = {
+  id: string;
+  bankName: string;
+  accountNumber: string;
+  accountHolder: string;
+  label?: string;
+};
 
 export type ServiceFees = {
   /** Blacklist atau sanggahan — hanya untuk karyawan/pekerja, bukan PT. */
@@ -114,6 +124,158 @@ export class PricingService {
         target: platformPricing.key,
         set: {
           valueJson: next,
+          updatedByUserId,
+          updatedAt: new Date(),
+        },
+      });
+    return next;
+  }
+
+  /** ID tetap untuk fallback .env (bukan rekening dari DB). */
+  private static readonly ENV_FALLBACK_ACCOUNT_ID =
+    '00000000-0000-4000-8000-000000000001';
+
+  private envManualPaymentAccounts(): ManualPaymentBankAccount[] {
+    return [
+      {
+        id: PricingService.ENV_FALLBACK_ACCOUNT_ID,
+        bankName: this.config.get<string>('MANUAL_PAYMENT_BANK_NAME', 'BCA'),
+        accountNumber: this.config.get<string>(
+          'MANUAL_PAYMENT_ACCOUNT_NUMBER',
+          '0000000000',
+        ),
+        accountHolder: this.config.get<string>(
+          'MANUAL_PAYMENT_ACCOUNT_HOLDER',
+          'PT WorkRecord',
+        ),
+      },
+    ];
+  }
+
+  private normalizeManualPaymentStored(
+    raw: unknown,
+  ): ManualPaymentBankAccount[] {
+    const env = this.envManualPaymentAccounts();
+    if (!raw || typeof raw !== 'object') return env;
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.accounts)) {
+      const accounts = obj.accounts
+        .map((a) => this.sanitizeManualPaymentAccount(a))
+        .filter(Boolean) as ManualPaymentBankAccount[];
+      return accounts.length > 0 ? accounts : env;
+    }
+    if (obj.bankName && obj.accountNumber) {
+      return [
+        this.sanitizeManualPaymentAccount({
+          id: randomUUID(),
+          ...obj,
+        })!,
+      ];
+    }
+    return env;
+  }
+
+  private sanitizeManualPaymentAccount(
+    raw: unknown,
+  ): ManualPaymentBankAccount | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const v = raw as Record<string, unknown>;
+    const bankName = String(v.bankName ?? '').trim();
+    const accountNumber = String(v.accountNumber ?? '').replace(/\s/g, '');
+    const accountHolder = String(v.accountHolder ?? '').trim();
+    if (!bankName || !accountNumber || !accountHolder) return null;
+    const label = v.label != null ? String(v.label).trim() : undefined;
+    const rawId = typeof v.id === 'string' ? v.id.trim() : '';
+    const uuidOk =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        rawId,
+      );
+    return {
+      id: uuidOk ? rawId : randomUUID(),
+      bankName,
+      accountNumber,
+      accountHolder,
+      label: label || undefined,
+    };
+  }
+
+  async getManualPaymentBanks(): Promise<ManualPaymentBankAccount[]> {
+    const [row] = await this.db
+      .select()
+      .from(platformPricing)
+      .where(eq(platformPricing.key, MANUAL_PAYMENT_BANK_KEY))
+      .limit(1);
+    if (!row?.valueJson) return this.envManualPaymentAccounts();
+    return this.normalizeManualPaymentStored(row.valueJson);
+  }
+
+  async resolveManualPaymentBank(
+    accountId?: string,
+  ): Promise<ManualPaymentBankAccount> {
+    const accounts = await this.getManualPaymentBanks();
+    if (accounts.length === 0) {
+      throw new BadRequestException('Rekening pembayaran belum dikonfigurasi');
+    }
+    if (accountId) {
+      const found = accounts.find((a) => a.id === accountId);
+      if (!found) {
+        throw new BadRequestException('Rekening tujuan transfer tidak valid');
+      }
+      return found;
+    }
+    if (accounts.length === 1) return accounts[0];
+    throw new BadRequestException('Pilih rekening tujuan transfer');
+  }
+
+  async setManualPaymentBanks(
+    input: Array<{
+      id?: string;
+      label?: string;
+      bankName: string;
+      accountNumber: string;
+      accountHolder: string;
+    }>,
+    updatedByUserId: string,
+  ): Promise<ManualPaymentBankAccount[]> {
+    if (!input.length) {
+      throw new BadRequestException('Minimal satu rekening');
+    }
+    const next: ManualPaymentBankAccount[] = [];
+    const numbers = new Set<string>();
+    for (const row of input) {
+      const acc = this.sanitizeManualPaymentAccount({
+        id: row.id ?? randomUUID(),
+        label: row.label,
+        bankName: row.bankName,
+        accountNumber: row.accountNumber,
+        accountHolder: row.accountHolder,
+      });
+      if (!acc) {
+        throw new BadRequestException('Data rekening tidak lengkap');
+      }
+      if (!/^\d+$/.test(acc.accountNumber)) {
+        throw new BadRequestException(
+          `Nomor rekening ${acc.accountNumber} hanya boleh angka`,
+        );
+      }
+      if (numbers.has(acc.accountNumber)) {
+        throw new BadRequestException('Nomor rekening duplikat');
+      }
+      numbers.add(acc.accountNumber);
+      next.push(acc);
+    }
+    await this.db
+      .insert(platformPricing)
+      .values({
+        key: MANUAL_PAYMENT_BANK_KEY,
+        valueJson: { accounts: next },
+        updatedByUserId,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: platformPricing.key,
+        set: {
+          valueJson: { accounts: next },
           updatedByUserId,
           updatedAt: new Date(),
         },

@@ -1,8 +1,10 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { and, desc, eq, gt, inArray, isNull, lte, or } from 'drizzle-orm';
 import { ConfigService } from '@nestjs/config';
@@ -16,6 +18,7 @@ import { adPlacements, payments } from '../database/schema';
 import { CreateAdDto } from './dto/create-ad.dto';
 import { UpdateAdDto } from './dto/update-ad.dto';
 import { PaymentGatewayFactory } from '../payments/payment-gateway.factory';
+import { PaymentsService } from '../payments/payments.service';
 import { JwtPayload } from '../auth/types/jwt-payload';
 import { AccessService } from '../access/access.service';
 import { PricingService } from '../pricing/pricing.service';
@@ -27,6 +30,8 @@ export class AdsService {
     private readonly database: DatabaseService,
     private readonly config: ConfigService,
     private readonly gatewayFactory: PaymentGatewayFactory,
+    @Inject(forwardRef(() => PaymentsService))
+    private readonly payments: PaymentsService,
     private readonly access: AccessService,
     private readonly pricing: PricingService,
   ) {}
@@ -268,15 +273,16 @@ export class AdsService {
       .set({ paymentId: payment.id, updatedAt: new Date() })
       .where(eq(adPlacements.id, ad.id));
 
-    const result = await this.gatewayFactory.getGateway().createPayment({
+    const result = await this.payments.finalizeCheckout(payment, {
       orderId,
-      amount,
       customerEmail: user.email,
       customerName: user.publicLoginId,
       itemName: 'Iklan WorkRecord',
+      baseAmount: amount,
+      manualBankAccountId: dto.manualBankAccountId,
     });
 
-    return { adId: ad.id, paymentId: payment.id, amount, ...result };
+    return { adId: ad.id, ...result };
   }
 
   async onPaymentSuccess(paymentId: string) {

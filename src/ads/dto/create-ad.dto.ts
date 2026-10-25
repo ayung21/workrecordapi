@@ -56,4 +56,8 @@ export class CreateAdDto {
   @IsOptional()
   @IsIn([...adPlacementSlots])
   placement?: (typeof adPlacementSlots)[number];
+
+  @IsOptional()
+  @IsUUID()
+  manualBankAccountId?: string;
 }

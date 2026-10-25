@@ -19,7 +19,16 @@ import { AuditService } from '../audit/audit.service';
 import { BlacklistsService } from '../blacklists/blacklists.service';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { AdsService } from '../ads/ads.service';
-import { PricingService } from '../pricing/pricing.service';
+import {
+  ManualPaymentBankAccount,
+  PricingService,
+} from '../pricing/pricing.service';
+import {
+  allocateManualUniqueCode,
+  transferAmountIdr,
+} from './manual-transfer.util';
+
+const MANUAL_OWNER_APPROVE_TYPES = ['AD', 'BLACKLIST', 'DISPUTE'] as const;
 
 @Injectable()
 export class PaymentsService {
@@ -46,6 +55,161 @@ export class PaymentsService {
 
   private gateway() {
     return this.gatewayFactory.getGateway();
+  }
+
+  async getManualBankInstructions() {
+    const accounts = await this.pricing.getManualPaymentBanks();
+    return { accounts };
+  }
+
+  private buildManualTransferPayload(
+    account: ManualPaymentBankAccount,
+    transferAmount: number,
+    baseAmount: number,
+    uniqueCode: number,
+  ) {
+    return {
+      bankAccountId: account.id,
+      bankName: account.bankName,
+      accountNumber: account.accountNumber,
+      accountHolder: account.accountHolder,
+      label: account.label,
+      baseAmount,
+      uniqueCode,
+      transferAmount,
+      note:
+        'Transfer tepat sesuai nominal (termasuk 3 digit unik di belakang). Konfirmasi oleh admin WorkRecord setelah dana masuk.',
+    };
+  }
+
+  async finalizeCheckout(
+    payment: typeof payments.$inferSelect,
+    input: {
+      orderId: string;
+      customerEmail: string;
+      customerName: string;
+      itemName: string;
+      baseAmount?: number;
+      manualBankAccountId?: string;
+    },
+  ) {
+    let amount = Number(payment.amount);
+    const baseAmount = input.baseAmount ?? amount;
+    let meta = (payment.metadata ?? {}) as Record<string, unknown>;
+    let current = payment;
+    let bankAccount: ManualPaymentBankAccount | undefined;
+
+    if (this.gatewayFactory.isManual()) {
+      bankAccount = await this.pricing.resolveManualPaymentBank(
+        input.manualBankAccountId,
+      );
+      const uniqueCode = await allocateManualUniqueCode(this.database);
+      amount = transferAmountIdr(baseAmount, uniqueCode);
+      meta = {
+        ...meta,
+        baseAmount,
+        uniqueCode,
+        manualTransfer: true,
+        manualBankAccountId: bankAccount.id,
+        manualBankSnapshot: {
+          bankName: bankAccount.bankName,
+          accountNumber: bankAccount.accountNumber,
+          accountHolder: bankAccount.accountHolder,
+          label: bankAccount.label,
+        },
+      };
+      const [updated] = await this.db
+        .update(payments)
+        .set({
+          amount: String(amount),
+          metadata: meta,
+          updatedAt: new Date(),
+        })
+        .where(eq(payments.id, payment.id))
+        .returning();
+      current = updated;
+    }
+
+    const result = await this.gateway().createPayment({
+      orderId: input.orderId,
+      amount,
+      customerEmail: input.customerEmail,
+      customerName: input.customerName,
+      itemName: input.itemName,
+    });
+
+    return {
+      paymentId: current.id,
+      amount,
+      originalAmount: baseAmount,
+      ...result,
+      manualTransfer: this.gatewayFactory.isManual() && bankAccount
+        ? this.buildManualTransferPayload(
+            bankAccount,
+            amount,
+            baseAmount,
+            meta.uniqueCode as number,
+          )
+        : undefined,
+    };
+  }
+
+  private async fulfillPaidPayment(paymentId: string) {
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    if (!payment || payment.status !== 'PAID') return;
+
+    if (payment.type === 'SUBSCRIPTION') {
+      await this.subscriptions.onPaymentSuccess(payment.id);
+    } else if (payment.type === 'VIEW_ACCESS') {
+      await this.viewAccess.onPaymentSuccess(payment.id);
+    } else if (payment.type === 'BLACKLIST') {
+      await this.blacklists.finalizeFromPayment(payment.id);
+    } else if (payment.type === 'AD') {
+      await this.ads.onPaymentSuccess(payment.id);
+    }
+  }
+
+  async approveManualPayment(paymentId: string, actorUserId?: string) {
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    if (!payment) throw new NotFoundException();
+    if (payment.gateway !== 'manual') {
+      throw new BadRequestException('Pembayaran ini bukan transfer manual');
+    }
+    if (payment.status !== 'PENDING') {
+      throw new BadRequestException('Pembayaran sudah diproses');
+    }
+    if (
+      !MANUAL_OWNER_APPROVE_TYPES.includes(
+        payment.type as (typeof MANUAL_OWNER_APPROVE_TYPES)[number],
+      )
+    ) {
+      throw new BadRequestException(
+        'Tipe pembayaran tidak mendukung konfirmasi manual',
+      );
+    }
+
+    const [paid] = await this.db
+      .update(payments)
+      .set({ status: 'PAID', paidAt: new Date(), updatedAt: new Date() })
+      .where(eq(payments.id, paymentId))
+      .returning();
+
+    await this.fulfillPaidPayment(paid.id);
+
+    await this.audit.log({
+      action: 'PAYMENT_COMPLETED',
+      actorUserId,
+      companyId: paid.companyId ?? undefined,
+      entityType: 'Payment',
+      entityId: paid.id,
+      metadata: { type: paid.type, manualApproval: true },
+    });
+
+    return paid;
   }
 
   /** Dev/staging only — never expose mock payment completion in production. */
@@ -117,6 +281,7 @@ export class PaymentsService {
     note: string;
     voucherCode?: string;
     changeRequestId?: string;
+    manualBankAccountId?: string;
   }) {
     const baseAmount = await this.pricing.getBlacklistPriceIdr();
     const priced = await this.vouchers.applyToAmount(
@@ -162,15 +327,14 @@ export class PaymentsService {
       });
     }
 
-    const result = await this.gateway().createPayment({
+    return this.finalizeCheckout(payment, {
       orderId,
-      amount,
       customerEmail: input.email,
       customerName: user.fullName,
       itemName: 'Blacklist / sanggahan karyawan — WorkRecord',
+      baseAmount: amount,
+      manualBankAccountId: input.manualBankAccountId,
     });
-
-    return { paymentId: payment.id, amount, originalAmount: baseAmount, ...result };
   }
 
   async createDisputePayment(input: {
@@ -179,6 +343,7 @@ export class PaymentsService {
     employeeRecordId?: string;
     email: string;
     voucherCode?: string;
+    manualBankAccountId?: string;
   }) {
     const baseAmount = await this.pricing.getDisputePriceIdr();
     const priced = await this.vouchers.applyToAmount(
@@ -222,15 +387,14 @@ export class PaymentsService {
       });
     }
 
-    const result = await this.gateway().createPayment({
+    return this.finalizeCheckout(payment, {
       orderId,
-      amount,
       customerEmail: input.email,
       customerName: user.fullName,
       itemName: 'Sanggahan pekerja — WorkRecord',
+      baseAmount: amount,
+      manualBankAccountId: input.manualBankAccountId,
     });
-
-    return { paymentId: payment.id, amount, originalAmount: baseAmount, ...result };
   }
 
   async createViewAccessPayment(input: {
@@ -319,17 +483,7 @@ export class PaymentsService {
         })
         .where(eq(payments.id, payment.id));
 
-      if (payment.type === 'SUBSCRIPTION') {
-        await this.subscriptions.onPaymentSuccess(payment.id);
-      } else if (payment.type === 'VIEW_ACCESS') {
-        await this.viewAccess.onPaymentSuccess(payment.id);
-      } else if (payment.type === 'BLACKLIST') {
-        await this.blacklists.finalizeFromPayment(payment.id);
-      } else if (payment.type === 'AD') {
-        await this.ads.onPaymentSuccess(payment.id);
-      } else if (payment.type === 'DISPUTE') {
-        /* legacy */
-      }
+      await this.fulfillPaidPayment(payment.id);
 
       await this.audit.log({
         action: 'PAYMENT_COMPLETED',
@@ -352,21 +506,23 @@ export class PaymentsService {
   async mockComplete(paymentId: string, mockSecret?: string) {
     this.assertMockPaymentAllowed(mockSecret);
 
+    const existing = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    if (!existing) throw new NotFoundException();
+    if (existing.gateway === 'manual') {
+      throw new BadRequestException(
+        'Pembayaran transfer manual harus dikonfirmasi admin WorkRecord (Transaksi → Konfirmasi pembayaran).',
+      );
+    }
+
     const [payment] = await this.db
       .update(payments)
       .set({ status: 'PAID', paidAt: new Date(), updatedAt: new Date() })
       .where(eq(payments.id, paymentId))
       .returning();
     if (!payment) throw new NotFoundException();
-    if (payment.type === 'SUBSCRIPTION') {
-      await this.subscriptions.onPaymentSuccess(payment.id);
-    } else if (payment.type === 'VIEW_ACCESS') {
-      await this.viewAccess.onPaymentSuccess(payment.id);
-    } else if (payment.type === 'BLACKLIST') {
-      await this.blacklists.finalizeFromPayment(payment.id);
-    } else if (payment.type === 'AD') {
-      await this.ads.onPaymentSuccess(payment.id);
-    }
+    await this.fulfillPaidPayment(payment.id);
     await this.audit.log({
       action: 'PAYMENT_COMPLETED',
       actorUserId: payment.userId ?? undefined,

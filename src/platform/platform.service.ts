@@ -60,21 +60,42 @@ export class PlatformService {
     return this.records.listAllForOwner(user, opts.limit);
   }
 
-  listPayments(limit = 100, type?: PaymentType) {
+  async listPayments(limit = 100, type?: PaymentType) {
     const cap = Math.min(limit, 200);
-    if (type) {
-      return this.db
-        .select()
-        .from(payments)
-        .where(eq(payments.type, type))
-        .orderBy(desc(payments.createdAt))
-        .limit(cap);
-    }
-    return this.db
-      .select()
+    let query = this.db
+      .select({
+        payment: payments,
+        companyName: companies.name,
+      })
       .from(payments)
+      .leftJoin(companies, eq(payments.companyId, companies.id))
+      .$dynamic();
+
+    if (type) {
+      query = query.where(eq(payments.type, type));
+    }
+
+    const rows = await query
       .orderBy(desc(payments.createdAt))
       .limit(cap);
+
+    return rows.map(({ payment, companyName }) => {
+      const meta = (payment.metadata ?? {}) as Record<string, unknown>;
+      return {
+        ...payment,
+        companyName,
+        uniqueCode:
+          typeof meta.uniqueCode === 'number' ? meta.uniqueCode : null,
+        baseAmount:
+          typeof meta.baseAmount === 'number'
+            ? meta.baseAmount
+            : Number(payment.amount),
+        manualTransferPending:
+          payment.gateway === 'manual' &&
+          payment.status === 'PENDING' &&
+          meta.manualTransfer === true,
+      };
+    });
   }
 
   async listBlacklists(limit = 100) {
@@ -236,6 +257,11 @@ export class PlatformService {
         mockCompleteEnabled:
           nodeEnv !== 'production' &&
           Boolean(this.config.get<string>('PAYMENT_MOCK_SECRET')?.trim()),
+        manualPaymentBanks: {
+          accounts: await this.pricing.getManualPaymentBanks(),
+        },
+        manualPaymentBankHint:
+          'Rekening transfer manual (iklan, sanggahan) — atur di panel admin Pengaturan; PT bisa memilih rekening saat bayar.',
       },
       mail: {
         configured: Boolean(smtpHost),

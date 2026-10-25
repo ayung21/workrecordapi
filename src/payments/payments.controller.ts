@@ -1,4 +1,4 @@
-import { Body, Controller, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Public } from '../common/decorators/public.decorator';
 import { PaymentsService } from './payments.service';
@@ -7,6 +7,12 @@ import { PaymentsService } from './payments.service';
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
+
+  @Public()
+  @Get('manual-instructions')
+  manualInstructions() {
+    return this.payments.getManualBankInstructions();
+  }
 
   @Public()
   @Post('webhook/midtrans')

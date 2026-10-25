@@ -96,6 +96,7 @@ export class BlacklistsService {
       note: string;
       email: string;
       voucherCode?: string;
+      manualBankAccountId?: string;
     },
   ) {
     if (!user.companyId) {
@@ -155,6 +156,7 @@ export class BlacklistsService {
       email: input.email,
       note,
       voucherCode: input.voucherCode,
+      manualBankAccountId: input.manualBankAccountId,
     });
     return {
       mode: 'CHECKOUT' as const,
@@ -165,7 +167,7 @@ export class BlacklistsService {
   async checkoutApprovedRequest(
     leader: JwtPayload,
     requestId: string,
-    input: { email: string; voucherCode?: string },
+    input: { email: string; voucherCode?: string; manualBankAccountId?: string },
   ) {
     if (!leader.companyId) {
       throw new ForbiddenException('Hanya akun perusahaan');
@@ -212,6 +214,7 @@ export class BlacklistsService {
       note,
       voucherCode: input.voucherCode ?? payload.voucherCode,
       changeRequestId: requestId,
+      manualBankAccountId: input.manualBankAccountId,
     });
 
     return {

@@ -44,6 +44,7 @@ export class DisputesController {
       employeeRecordId: dto.employeeRecordId,
       email: dto.email,
       voucherCode: dto.voucherCode,
+      manualBankAccountId: dto.manualBankAccountId,
     });
   }
 
