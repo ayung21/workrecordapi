@@ -27,6 +27,7 @@ import {
   allocateManualUniqueCode,
   transferAmountIdr,
 } from './manual-transfer.util';
+import { BillingMailService } from '../mail/billing-mail.service';
 
 const MANUAL_OWNER_APPROVE_TYPES = ['AD', 'BLACKLIST', 'DISPUTE'] as const;
 
@@ -47,6 +48,7 @@ export class PaymentsService {
     private readonly pricing: PricingService,
     @Inject(forwardRef(() => AdsService))
     private readonly ads: AdsService,
+    private readonly billingMail: BillingMailService,
   ) {}
 
   private get db() {
@@ -138,19 +140,31 @@ export class PaymentsService {
       itemName: input.itemName,
     });
 
-    return {
-      paymentId: current.id,
-      amount,
-      originalAmount: baseAmount,
-      ...result,
-      manualTransfer: this.gatewayFactory.isManual() && bankAccount
+    const manualTransfer =
+      this.gatewayFactory.isManual() && bankAccount
         ? this.buildManualTransferPayload(
             bankAccount,
             amount,
             baseAmount,
             meta.uniqueCode as number,
           )
-        : undefined,
+        : undefined;
+
+    void this.billingMail.notifyCheckoutRequired({
+      payment: current,
+      customerEmail: input.customerEmail,
+      customerName: input.customerName,
+      itemName: input.itemName,
+      amount,
+      manualTransfer,
+    });
+
+    return {
+      paymentId: current.id,
+      amount,
+      originalAmount: baseAmount,
+      ...result,
+      manualTransfer,
     };
   }
 
@@ -208,6 +222,8 @@ export class PaymentsService {
       entityId: paid.id,
       metadata: { type: paid.type, manualApproval: true },
     });
+
+    void this.billingMail.notifyManualPaymentApproved(paid);
 
     return paid;
   }

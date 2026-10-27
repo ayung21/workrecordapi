@@ -27,6 +27,11 @@ import {
   parseDateOnlyField,
   parseOptionalDateOnlyField,
 } from '../common/utils/parse-date-only';
+import {
+  photoPathFallbackCandidates,
+  readFirstExistingFile,
+  toRelativeUploadPath,
+} from '../common/utils/upload-path';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
@@ -410,7 +415,7 @@ export class EmployeeRecordsService {
     await mkdir(dir, { recursive: true });
     const filePath = join(dir, `photo.${compressed.extension}`);
     await writeFile(filePath, compressed.buffer);
-    return filePath;
+    return toRelativeUploadPath(this.uploadRoot(), filePath);
   }
 
   private async saveStagingPhoto(
@@ -424,7 +429,7 @@ export class EmployeeRecordsService {
     await mkdir(dir, { recursive: true });
     const filePath = join(dir, `${randomUUID()}.${compressed.extension}`);
     await writeFile(filePath, compressed.buffer);
-    return filePath;
+    return toRelativeUploadPath(this.uploadRoot(), filePath);
   }
 
   async readPhotoFile(companyId: string, recordId: string, user: JwtPayload) {
@@ -444,15 +449,21 @@ export class EmployeeRecordsService {
       sameCompany ? undefined : { crossCompanyNikSearch: true },
     );
     if (visibility === 'denied') throw new NotFoundException();
-    const data = await readFile(record.photoPath);
-    const ext = record.photoPath.split('.').pop()?.toLowerCase();
+
+    const root = this.uploadRoot();
+    const candidates = photoPathFallbackCandidates(root, record.photoPath);
+    const found = await readFirstExistingFile(candidates);
+    if (!found) {
+      throw new NotFoundException('Foto karyawan tidak ditemukan di server');
+    }
+    const ext = found.path.split('.').pop()?.toLowerCase();
     const mime =
       ext === 'png'
         ? 'image/png'
         : ext === 'webp'
           ? 'image/webp'
           : 'image/jpeg';
-    return { data, mime };
+    return { data: found.data, mime };
   }
 
   async create(

@@ -511,28 +511,78 @@ export class BlacklistsService {
   async spendReport(companyId: string) {
     const rows = await this.listForCompany(companyId);
     const paymentIds = rows.map((r) => r.paymentId);
-    let totalSpent = 0;
+    const paymentById = new Map<
+      string,
+      { amount: number; status: (typeof payments.$inferSelect)['status'] }
+    >();
     if (paymentIds.length) {
-      const paid = await this.db
+      const paymentRows = await this.db
         .select()
         .from(payments)
-        .where(
-          and(eq(payments.status, 'PAID'), inArray(payments.id, paymentIds)),
-        );
-      for (const p of paid) totalSpent += Number(p.amount);
+        .where(inArray(payments.id, paymentIds));
+      for (const p of paymentRows) {
+        paymentById.set(p.id, {
+          amount: Number(p.amount),
+          status: p.status,
+        });
+      }
     }
-    return {
-      totalSpent,
-      currency: 'IDR',
-      blacklists: rows.map((r) => ({
+
+    const recordIds = rows
+      .map((r) => r.employeeRecordId)
+      .filter((id): id is string => Boolean(id));
+    const recordById = new Map<
+      string,
+      { employeeName: string; position: string | null }
+    >();
+    if (recordIds.length) {
+      const recordRows = await this.db
+        .select({
+          id: employeeRecords.id,
+          employeeName: employeeRecords.employeeName,
+          position: employeeRecords.position,
+        })
+        .from(employeeRecords)
+        .where(inArray(employeeRecords.id, recordIds));
+      for (const rec of recordRows) {
+        recordById.set(rec.id, {
+          employeeName: rec.employeeName,
+          position: rec.position,
+        });
+      }
+    }
+
+    let totalSpent = 0;
+    const activeSanggahan = rows.filter((r) => r.status === 'ACTIVE').length;
+
+    const blacklists = rows.map((r) => {
+      const pay = paymentById.get(r.paymentId);
+      const amountIdr = pay?.amount ?? 0;
+      if (pay?.status === 'PAID') totalSpent += amountIdr;
+      const rec = r.employeeRecordId
+        ? recordById.get(r.employeeRecordId)
+        : undefined;
+      return {
         id: r.id,
         status: r.status,
         note: r.note,
         nationalIdNumber: r.nationalIdNumber,
         employeeRecordId: r.employeeRecordId,
+        employeeName: rec?.employeeName ?? null,
+        position: rec?.position ?? null,
         createdAt: r.createdAt,
         paymentId: r.paymentId,
-      })),
+        paymentStatus: pay?.status ?? null,
+        amountIdr,
+      };
+    });
+
+    return {
+      totalSpent,
+      totalSanggahan: rows.length,
+      activeSanggahan,
+      currency: 'IDR',
+      blacklists,
     };
   }
 }
