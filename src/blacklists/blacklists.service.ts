@@ -126,7 +126,7 @@ export class BlacklistsService {
             employeeRecordId: input.employeeRecordId,
             note,
             email: input.email,
-            voucherCode: input.voucherCode,
+            voucherCode: input.voucherCode?.trim().toUpperCase() || undefined,
           },
           requestedById: user.sub,
         })

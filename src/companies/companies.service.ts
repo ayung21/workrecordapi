@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { and, count, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import {
   companies,
@@ -468,9 +468,17 @@ export class CompaniesService {
 
   async listForOwner() {
     return this.db
-      .select()
+      .select({
+        id: companies.id,
+        name: companies.name,
+        adminPublicId: companies.adminPublicId,
+        companyPhone: companies.companyPhone,
+        operationalStatus: companies.operationalStatus,
+        surveyStatus: companies.surveyStatus,
+        createdAt: companies.createdAt,
+      })
       .from(companies)
-      .orderBy(desc(companies.createdAt));
+      .orderBy(asc(companies.name));
   }
 
   async updateSurvey(
