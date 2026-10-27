@@ -66,6 +66,9 @@ export class VouchersController {
     if (!(voucherAppliesTo as readonly string[]).includes(appliesTo)) {
       throw new BadRequestException('appliesTo tidak valid');
     }
+    if (appliesTo === 'BLACKLIST') {
+      return this.vouchers.listAvailableForSanggahanKaryawan(user.companyId);
+    }
     return this.vouchers.listAvailableForCompany(
       user.companyId,
       appliesTo as VoucherAppliesTo,
@@ -75,6 +78,13 @@ export class VouchersController {
   @Public()
   @Post('quote')
   quote(@Body() dto: QuoteVoucherDto) {
+    if (dto.appliesTo === 'BLACKLIST' || dto.appliesTo === 'DISPUTE') {
+      return this.vouchers.quoteForSanggahanKaryawan(
+        dto.code,
+        dto.amount,
+        dto.companyId,
+      );
+    }
     return this.vouchers.quote(
       dto.code,
       dto.appliesTo,

@@ -8,6 +8,7 @@ import { PaymentType, VoucherAppliesTo } from '../database/enums';
 import { DatabaseService } from '../database/database.service';
 import {
   companies,
+  payments,
   voucherCompanies,
   voucherRedemptions,
   vouchers,
@@ -191,6 +192,26 @@ export class VouchersService {
     return full ?? row;
   }
 
+  /** Kuota dihitung dari pembayaran yang sudah PAID (bukan checkout tertunda). */
+  private async countPaidRedemptions(
+    voucherId: string,
+    companyId?: string,
+  ): Promise<number> {
+    const conditions = [
+      eq(voucherRedemptions.voucherId, voucherId),
+      eq(payments.status, 'PAID'),
+    ];
+    if (companyId) {
+      conditions.push(eq(voucherRedemptions.companyId, companyId));
+    }
+    const [{ count }] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(voucherRedemptions)
+      .innerJoin(payments, eq(voucherRedemptions.paymentId, payments.id))
+      .where(and(...conditions));
+    return count ?? 0;
+  }
+
   private async findByCode(code: string) {
     const [row] = await this.db
       .select()
@@ -235,17 +256,7 @@ export class VouchersService {
           'Voucher memerlukan konteks perusahaan untuk kuota',
         );
       }
-      const [{ count }] = await this.db
-        .select({
-          count: sql<number>`count(*)::int`,
-        })
-        .from(voucherRedemptions)
-        .where(
-          and(
-            eq(voucherRedemptions.voucherId, row.id),
-            eq(voucherRedemptions.companyId, companyId),
-          ),
-        );
+      const count = await this.countPaidRedemptions(row.id, companyId);
       if (count >= row.maxUsesPerCompany) {
         throw new BadRequestException(
           'Kuota voucher untuk perusahaan ini sudah habis',
@@ -270,8 +281,11 @@ export class VouchersService {
     if (row.expiresAt && row.expiresAt < new Date()) {
       throw new BadRequestException('Voucher sudah kedaluwarsa');
     }
-    if (row.maxUses != null && row.usedCount >= row.maxUses) {
-      throw new BadRequestException('Voucher sudah habis');
+    if (row.maxUses != null) {
+      const paidUses = await this.countPaidRedemptions(row.id);
+      if (paidUses >= row.maxUses) {
+        throw new BadRequestException('Voucher sudah habis');
+      }
     }
 
     await this.assertCompanyEligibility(row, companyId);
@@ -352,7 +366,10 @@ export class VouchersService {
 
     for (const row of rows) {
       if (row.expiresAt && row.expiresAt < now) continue;
-      if (row.maxUses != null && row.usedCount >= row.maxUses) continue;
+      if (row.maxUses != null) {
+        const paidUses = await this.countPaidRedemptions(row.id);
+        if (paidUses >= row.maxUses) continue;
+      }
 
       const mode = row.eligibilityMode ?? 'ALL';
       if (mode === 'SELECTED') {
@@ -361,15 +378,7 @@ export class VouchersService {
       }
 
       if (row.maxUsesPerCompany != null) {
-        const [{ count }] = await this.db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(voucherRedemptions)
-          .where(
-            and(
-              eq(voucherRedemptions.voucherId, row.id),
-              eq(voucherRedemptions.companyId, companyId),
-            ),
-          );
+        const count = await this.countPaidRedemptions(row.id, companyId);
         if (count >= row.maxUsesPerCompany) continue;
       }
 
@@ -390,7 +399,8 @@ export class VouchersService {
     voucherCode?: string,
     companyId?: string,
   ): Promise<{ amount: number; voucherId?: string }> {
-    if (!voucherCode?.trim()) {
+    const code = voucherCode?.trim().toUpperCase();
+    if (!code) {
       return Promise.resolve({ amount });
     }
     const map: Partial<Record<PaymentType, VoucherAppliesTo>> = {
@@ -402,9 +412,55 @@ export class VouchersService {
     if (!appliesTo) {
       return Promise.resolve({ amount });
     }
-    return this.quote(voucherCode, appliesTo, amount, companyId).then((q) => ({
+    if (paymentType === 'BLACKLIST' || paymentType === 'DISPUTE') {
+      return this.quoteForSanggahanKaryawan(code, amount, companyId).then(
+        (q) => ({
+          amount: q.finalAmount,
+          voucherId: q.voucherId,
+        }),
+      );
+    }
+
+    return this.quote(code, appliesTo, amount, companyId).then((q) => ({
       amount: q.finalAmount,
       voucherId: q.voucherId,
     }));
+  }
+
+  /** Sanggahan karyawan (BLACKLIST) dan pengaduan pekerja (DISPUTE) memakai tarif sama. */
+  async listAvailableForSanggahanKaryawan(companyId: string) {
+    const blacklist = await this.listAvailableForCompany(companyId, 'BLACKLIST');
+    const dispute = await this.listAvailableForCompany(companyId, 'DISPUTE');
+    const seen = new Set<string>();
+    const merged: typeof blacklist = [];
+    for (const row of [...blacklist, ...dispute]) {
+      if (seen.has(row.code)) continue;
+      seen.add(row.code);
+      merged.push(row);
+    }
+    return merged;
+  }
+
+  async quoteForSanggahanKaryawan(
+    code: string,
+    originalAmount: number,
+    companyId?: string,
+  ): Promise<VoucherQuote> {
+    const normalized = code.trim().toUpperCase();
+    let lastError: unknown;
+    for (const appliesTo of ['BLACKLIST', 'DISPUTE'] as const) {
+      try {
+        return await this.quote(
+          normalized,
+          appliesTo,
+          originalAmount,
+          companyId,
+        );
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (lastError instanceof Error) throw lastError;
+    throw new BadRequestException('Voucher tidak valid');
   }
 }

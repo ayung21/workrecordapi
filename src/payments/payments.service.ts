@@ -10,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { eq } from 'drizzle-orm';
 import { ViewDurationUnit } from '../database/enums';
 import { DatabaseService } from '../database/database.service';
-import { payments, users } from '../database/schema';
+import { payments, users, voucherRedemptions } from '../database/schema';
 import { PaymentGatewayFactory } from './payment-gateway.factory';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { ViewAccessService } from '../view-access/view-access.service';
@@ -159,13 +159,49 @@ export class PaymentsService {
       manualTransfer,
     });
 
+    const catalogAmountRaw = meta.originalAmount;
+    const catalogAmount =
+      typeof catalogAmountRaw === 'number'
+        ? catalogAmountRaw
+        : catalogAmountRaw != null
+          ? Number(catalogAmountRaw)
+          : baseAmount;
+    const discountedBase =
+      typeof meta.discountedAmount === 'number'
+        ? meta.discountedAmount
+        : baseAmount;
+
     return {
       paymentId: current.id,
       amount,
-      originalAmount: baseAmount,
+      originalAmount: catalogAmount,
+      discountedAmount: discountedBase,
+      discountAmount: Math.max(0, catalogAmount - discountedBase),
       ...result,
       manualTransfer,
     };
+  }
+
+  private async redeemVoucherForPayment(
+    payment: typeof payments.$inferSelect,
+  ): Promise<void> {
+    const meta = (payment.metadata ?? {}) as { voucherId?: string };
+    const voucherId = meta.voucherId;
+    if (!voucherId) return;
+
+    const [existing] = await this.db
+      .select({ id: voucherRedemptions.id })
+      .from(voucherRedemptions)
+      .where(eq(voucherRedemptions.paymentId, payment.id))
+      .limit(1);
+    if (existing) return;
+
+    await this.vouchers.redeem({
+      voucherId,
+      paymentId: payment.id,
+      userId: payment.userId ?? undefined,
+      companyId: payment.companyId ?? undefined,
+    });
   }
 
   private async fulfillPaidPayment(paymentId: string) {
@@ -173,6 +209,8 @@ export class PaymentsService {
       where: eq(payments.id, paymentId),
     });
     if (!payment || payment.status !== 'PAID') return;
+
+    await this.redeemVoucherForPayment(payment);
 
     if (payment.type === 'SUBSCRIPTION') {
       await this.subscriptions.onPaymentSuccess(payment.id);
@@ -289,6 +327,11 @@ export class PaymentsService {
     return { paymentId: payment.id, subscriptionId: sub.id, ...result };
   }
 
+  private normalizeVoucherCode(code?: string): string | undefined {
+    const trimmed = code?.trim();
+    return trimmed ? trimmed.toUpperCase() : undefined;
+  }
+
   async createBlacklistPayment(input: {
     userId: string;
     companyId: string;
@@ -299,11 +342,12 @@ export class PaymentsService {
     changeRequestId?: string;
     manualBankAccountId?: string;
   }) {
+    const voucherCode = this.normalizeVoucherCode(input.voucherCode);
     const baseAmount = await this.pricing.getBlacklistPriceIdr();
     const priced = await this.vouchers.applyToAmount(
       'BLACKLIST',
       baseAmount,
-      input.voucherCode,
+      voucherCode,
       input.companyId,
     );
     const amount = priced.amount;
@@ -327,21 +371,13 @@ export class PaymentsService {
           email: input.email,
           note: input.note,
           voucherId: priced.voucherId,
-          voucherCode: input.voucherCode,
+          voucherCode,
           originalAmount: baseAmount,
+          discountedAmount: amount,
           changeRequestId: input.changeRequestId,
         },
       })
       .returning();
-
-    if (priced.voucherId) {
-      await this.vouchers.redeem({
-        voucherId: priced.voucherId,
-        paymentId: payment.id,
-        userId: input.userId,
-        companyId: input.companyId,
-      });
-    }
 
     return this.finalizeCheckout(payment, {
       orderId,
@@ -361,11 +397,12 @@ export class PaymentsService {
     voucherCode?: string;
     manualBankAccountId?: string;
   }) {
+    const voucherCode = this.normalizeVoucherCode(input.voucherCode);
     const baseAmount = await this.pricing.getDisputePriceIdr();
     const priced = await this.vouchers.applyToAmount(
       'DISPUTE',
       baseAmount,
-      input.voucherCode,
+      voucherCode,
       input.companyId,
     );
     const amount = priced.amount;
@@ -388,20 +425,12 @@ export class PaymentsService {
           employeeRecordId: input.employeeRecordId,
           email: input.email,
           voucherId: priced.voucherId,
-          voucherCode: input.voucherCode,
+          voucherCode,
           originalAmount: baseAmount,
+          discountedAmount: amount,
         },
       })
       .returning();
-
-    if (priced.voucherId) {
-      await this.vouchers.redeem({
-        voucherId: priced.voucherId,
-        paymentId: payment.id,
-        userId: input.userId,
-        companyId: input.companyId,
-      });
-    }
 
     return this.finalizeCheckout(payment, {
       orderId,
