@@ -318,6 +318,8 @@ export class CompaniesService {
     const report = await this.blacklists.spendReport(companyId);
     return {
       totalSpent: report.totalSpent,
+      totalSanggahan: report.totalSanggahan,
+      activeSanggahan: report.activeSanggahan,
       currency: report.currency,
       blacklists: report.blacklists,
       disputes: report.blacklists.map((b) => ({
@@ -325,7 +327,12 @@ export class CompaniesService {
         status: b.status,
         description: b.note,
         employeeRecordId: b.employeeRecordId,
+        employeeName: b.employeeName,
+        nationalIdNumber: b.nationalIdNumber,
+        position: b.position,
         paymentId: b.paymentId,
+        paymentStatus: b.paymentStatus,
+        amountIdr: b.amountIdr,
         createdAt: b.createdAt,
       })),
     };

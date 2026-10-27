@@ -183,7 +183,7 @@ export class AuthService {
         userAgent: meta?.userAgent,
       });
       throw new ForbiddenException(
-        'Akun perusahaan tidak dapat masuk ke panel admin. Gunakan frontend WorkRecord.',
+        'Akun perusahaan tidak dapat masuk ke panel admin. Gunakan WorkRecord.',
       );
     }
     return this.issueLoginResponse(user, meta, 'AUTH_ADMIN_LOGIN', {
