@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { Public } from '../common/decorators/public.decorator';
@@ -78,6 +87,16 @@ export class AuthController {
     @Body() dto: RequestEmailVerifyDto,
   ) {
     return this.auth.requestEmailVerification(user.sub, dto.newEmail);
+  }
+
+  @Public()
+  @Get('verify-email')
+  async verifyEmailFromLink(
+    @Query('token') token: string,
+    @Res() res: Response,
+  ) {
+    const html = await this.auth.renderEmailVerificationPage(token ?? '');
+    res.type('text/html; charset=utf-8').send(html);
   }
 
   @Public()
