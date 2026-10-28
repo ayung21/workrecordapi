@@ -11,7 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { mkdir, readFile, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { isAbsolute, join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { DatabaseService } from '../database/database.service';
 import { adPlacements, payments } from '../database/schema';
@@ -44,17 +44,32 @@ export class AdsService {
     return this.config.get<string>('UPLOAD_DIR') ?? join(process.cwd(), 'uploads');
   }
 
+  private resolveBannerDiskPath(bannerImagePath: string): string {
+    if (isAbsolute(bannerImagePath)) return bannerImagePath;
+    return join(this.uploadRoot(), bannerImagePath);
+  }
+
+  private bannerFileExists(bannerImagePath: string | null | undefined): boolean {
+    if (typeof bannerImagePath !== 'string' || !bannerImagePath.length) {
+      return false;
+    }
+    const resolved = this.resolveBannerDiskPath(bannerImagePath);
+    return existsSync(resolved);
+  }
+
   private serializeAd<T extends { id: string; bannerImagePath?: string | null }>(
     row: T,
   ) {
     const { bannerImagePath, ...rest } = row;
-    const hasBannerFile =
-      typeof bannerImagePath === 'string' &&
-      bannerImagePath.length > 0 &&
-      existsSync(bannerImagePath);
+    const hasBannerFile = this.bannerFileExists(bannerImagePath);
     return {
       ...rest,
-      bannerImageUrl: hasBannerFile ? `ads/${row.id}/banner` : null,
+      bannerImageUrl:
+        typeof bannerImagePath === 'string' && bannerImagePath.length > 0
+          ? `ads/${row.id}/banner`
+          : null,
+      /** Frontend dapat pakai flag ini; URL banner tetap disediakan jika path tersimpan. */
+      hasBannerFile,
     };
   }
 
@@ -111,8 +126,9 @@ export class AdsService {
       .where(eq(adPlacements.id, id))
       .limit(1);
     if (!row?.bannerImagePath) throw new NotFoundException();
-    const data = await readFile(row.bannerImagePath);
-    const ext = row.bannerImagePath.split('.').pop()?.toLowerCase();
+    const diskPath = this.resolveBannerDiskPath(row.bannerImagePath);
+    const data = await readFile(diskPath);
+    const ext = diskPath.split('.').pop()?.toLowerCase();
     const mime =
       ext === 'png'
         ? 'image/png'
@@ -178,6 +194,16 @@ export class AdsService {
   }
 
   async update(id: string, dto: UpdateAdDto) {
+    const [current] = await this.db
+      .select({
+        startsAt: adPlacements.startsAt,
+        placement: adPlacements.placement,
+      })
+      .from(adPlacements)
+      .where(eq(adPlacements.id, id))
+      .limit(1);
+    if (!current) throw new NotFoundException();
+
     const patch: Record<string, unknown> = { updatedAt: new Date() };
     if (dto.title !== undefined) patch.title = dto.title.trim();
     if (dto.subtitle !== undefined) patch.subtitle = dto.subtitle?.trim();
@@ -193,6 +219,25 @@ export class AdsService {
     }
     if (dto.sortOrder !== undefined) patch.sortOrder = dto.sortOrder;
     if (dto.placement !== undefined) patch.placement = dto.placement;
+
+    if (dto.status === 'ACTIVE') {
+      const now = new Date();
+      const effectiveStarts =
+        dto.startsAt !== undefined
+          ? dto.startsAt
+            ? new Date(dto.startsAt)
+            : null
+          : current.startsAt;
+      if (!effectiveStarts || effectiveStarts > now) {
+        patch.startsAt = now;
+      }
+      if (
+        dto.placement === undefined &&
+        (current.placement == null || current.placement === '')
+      ) {
+        patch.placement = 'COMPANY_PROFILE_HERO';
+      }
+    }
 
     const [row] = await this.db
       .update(adPlacements)
