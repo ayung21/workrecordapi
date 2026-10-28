@@ -381,25 +381,32 @@ export class PaymentsService {
         : catalogAmount;
 
     let manualTransfer;
-    if (meta.manualTransfer && meta.manualBankSnapshot) {
+    if (meta.manualBankSnapshot) {
       const snap = meta.manualBankSnapshot as {
         bankName: string;
         accountNumber: string;
         accountHolder: string;
         label?: string | null;
       };
-      manualTransfer = this.buildManualTransferPayload(
-        {
-          id: String(meta.manualBankAccountId ?? ''),
-          bankName: snap.bankName,
-          accountNumber: snap.accountNumber,
-          accountHolder: snap.accountHolder,
-          label: snap.label ?? undefined,
-        },
-        amount,
-        typeof meta.baseAmount === 'number' ? meta.baseAmount : amount,
-        meta.uniqueCode as number,
-      );
+      const uniqueCodeRaw = meta.uniqueCode;
+      const uniqueCode =
+        typeof uniqueCodeRaw === 'number'
+          ? uniqueCodeRaw
+          : Number(uniqueCodeRaw);
+      if (Number.isFinite(uniqueCode)) {
+        manualTransfer = this.buildManualTransferPayload(
+          {
+            id: String(meta.manualBankAccountId ?? ''),
+            bankName: snap.bankName,
+            accountNumber: snap.accountNumber,
+            accountHolder: snap.accountHolder,
+            label: snap.label ?? undefined,
+          },
+          amount,
+          typeof meta.baseAmount === 'number' ? meta.baseAmount : amount,
+          uniqueCode,
+        );
+      }
     }
 
     return {

@@ -217,6 +217,22 @@ export class BlacklistsService {
       manualBankAccountId: input.manualBankAccountId,
     });
 
+    await this.db
+      .update(recordChangeRequests)
+      .set({
+        approvedById: leader.sub,
+        payload: {
+          ...payload,
+          employeeRecordId,
+          note,
+          email: input.email,
+          voucherCode: input.voucherCode ?? payload.voucherCode,
+          blacklistCheckoutPaymentId: payment.paymentId,
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(recordChangeRequests.id, requestId));
+
     return {
       mode: 'CHECKOUT' as const,
       requestId,

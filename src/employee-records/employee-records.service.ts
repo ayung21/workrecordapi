@@ -13,6 +13,7 @@ import {
   disputes,
   employeeProfiles,
   employeeRecords,
+  payments,
   recordChangeRequests,
   users,
 } from '../database/schema';
@@ -31,6 +32,7 @@ import {
 import {
   photoPathFallbackCandidates,
   readFirstExistingFile,
+  resolveUploadPath,
   toRelativeUploadPath,
 } from '../common/utils/upload-path';
 import { mkdir, readFile, writeFile } from 'fs/promises';
@@ -467,6 +469,60 @@ export class EmployeeRecordsService {
     return process.env.UPLOAD_DIR ?? join(process.cwd(), 'uploads');
   }
 
+  private static readonly UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  private isUuid(value: string): boolean {
+    return EmployeeRecordsService.UUID_RE.test(value);
+  }
+
+  private mimeFromPath(filePath: string): string {
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    if (ext === 'png') return 'image/png';
+    if (ext === 'webp') return 'image/webp';
+    return 'image/jpeg';
+  }
+
+  private async readPhotoBytes(storedPath: string) {
+    const root = this.uploadRoot();
+    const candidates = photoPathFallbackCandidates(root, storedPath);
+    candidates.unshift(resolveUploadPath(root, storedPath));
+    const found = await readFirstExistingFile(candidates);
+    if (!found) {
+      throw new NotFoundException('Foto karyawan tidak ditemukan di server');
+    }
+    return { data: found.data, mime: this.mimeFromPath(found.path) };
+  }
+
+  private async readPhotoFromPendingRequest(
+    companyId: string,
+    requestId: string,
+    user: JwtPayload,
+  ) {
+    const gate = await this.access.canCrudRecords(user, companyId);
+    if (!gate.allowed && !this.access.isOwner(user)) {
+      throw new NotFoundException();
+    }
+
+    const req = await this.db.query.recordChangeRequests.findFirst({
+      where: and(
+        eq(recordChangeRequests.id, requestId),
+        eq(recordChangeRequests.companyId, companyId),
+      ),
+    });
+    if (!req || req.status !== 'PENDING_APPROVAL') {
+      throw new NotFoundException();
+    }
+
+    const payload = req.payload as { photoStagingPath?: string } | null;
+    const stored = payload?.photoStagingPath?.trim();
+    if (!stored) {
+      throw new NotFoundException('Foto belum diunggah pada pengajuan ini');
+    }
+
+    return this.readPhotoBytes(stored);
+  }
+
   private assertEmployeePhotoUploadSize(file: { buffer: Buffer }) {
     if (file.buffer.length > EMPLOYEE_PHOTO_MAX_UPLOAD_BYTES) {
       throw new BadRequestException('Ukuran foto maksimal 5 MB');
@@ -506,6 +562,19 @@ export class EmployeeRecordsService {
   }
 
   async readPhotoFile(companyId: string, recordId: string, user: JwtPayload) {
+    const pendingPrefix = 'pending-';
+    if (recordId.startsWith(pendingPrefix)) {
+      const requestId = recordId.slice(pendingPrefix.length);
+      if (!this.isUuid(requestId)) {
+        throw new NotFoundException();
+      }
+      return this.readPhotoFromPendingRequest(companyId, requestId, user);
+    }
+
+    if (!this.isUuid(recordId)) {
+      throw new NotFoundException();
+    }
+
     const record = await this.db.query.employeeRecords.findFirst({
       where: and(
         eq(employeeRecords.id, recordId),
@@ -523,20 +592,7 @@ export class EmployeeRecordsService {
     );
     if (visibility === 'denied') throw new NotFoundException();
 
-    const root = this.uploadRoot();
-    const candidates = photoPathFallbackCandidates(root, record.photoPath);
-    const found = await readFirstExistingFile(candidates);
-    if (!found) {
-      throw new NotFoundException('Foto karyawan tidak ditemukan di server');
-    }
-    const ext = found.path.split('.').pop()?.toLowerCase();
-    const mime =
-      ext === 'png'
-        ? 'image/png'
-        : ext === 'webp'
-          ? 'image/webp'
-          : 'image/jpeg';
-    return { data: found.data, mime };
+    return this.readPhotoBytes(record.photoPath);
   }
 
   async create(
@@ -1194,11 +1250,55 @@ export class EmployeeRecordsService {
             .where(inArray(users.id, userIds))
         : [];
     const byId = new Map(actors.map((a) => [a.id, a]));
-    return rows.map((r) => ({
-      ...r,
-      requestedBy: byId.get(r.requestedById) ?? null,
-      processedBy: r.approvedById ? byId.get(r.approvedById) ?? null : null,
-    }));
+
+    const companyId = rows[0]?.companyId;
+    const pendingBlacklistPayments =
+      companyId != null
+        ? await this.db
+            .select({
+              id: payments.id,
+              status: payments.status,
+              metadata: payments.metadata,
+            })
+            .from(payments)
+            .where(
+              and(
+                eq(payments.companyId, companyId),
+                eq(payments.type, 'BLACKLIST'),
+                eq(payments.status, 'PENDING'),
+              ),
+            )
+        : [];
+    const pendingPaymentByChangeRequest = new Map<string, string>();
+    for (const p of pendingBlacklistPayments) {
+      const changeRequestId = (p.metadata as { changeRequestId?: string })
+        ?.changeRequestId;
+      if (changeRequestId) {
+        pendingPaymentByChangeRequest.set(changeRequestId, p.id);
+      }
+    }
+
+    return rows.map((r) => {
+      const payload = (r.payload ?? {}) as Record<string, unknown>;
+      const payloadPaymentId =
+        typeof payload.blacklistCheckoutPaymentId === 'string'
+          ? payload.blacklistCheckoutPaymentId
+          : undefined;
+      const linkedPaymentId =
+        pendingPaymentByChangeRequest.get(r.id) ?? payloadPaymentId ?? null;
+      const awaitingBlacklistPayment =
+        r.action === 'BLACKLIST' &&
+        r.status === 'PENDING_APPROVAL' &&
+        pendingPaymentByChangeRequest.has(r.id);
+
+      return {
+        ...r,
+        requestedBy: byId.get(r.requestedById) ?? null,
+        processedBy: r.approvedById ? byId.get(r.approvedById) ?? null : null,
+        awaitingBlacklistPayment,
+        blacklistCheckoutPaymentId: linkedPaymentId,
+      };
+    });
   }
 
   async rejectChange(
