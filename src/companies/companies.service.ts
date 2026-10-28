@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
@@ -37,6 +38,8 @@ import { AccessService } from '../access/access.service';
 
 @Injectable()
 export class CompaniesService {
+  private readonly logger = new Logger(CompaniesService.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly mail: MailService,
@@ -169,24 +172,47 @@ export class CompaniesService {
 
     await this.companyDocuments.ensureDocumentRows(result.company.id);
 
-    await this.mail.sendMail({
-      to: email,
-      subject: 'Registrasi WorkRecord — unggah dokumen perusahaan',
-      html: `
+    try {
+      await this.auth.sendAccountActivation(result.partnerUser.id, {
+        publicLoginId: partnerPublicId,
+        roleLabel: partnerRoleLabel,
+        companyName: dto.companyName,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Email aktivasi akun kedua gagal (${partnerEmail}): ${message}`,
+      );
+      throw new BadRequestException(
+        'Perusahaan terdaftar, tetapi email aktivasi ke akun kedua gagal dikirim. Periksa konfigurasi SMTP atau hubungi admin WorkRecord.',
+      );
+    }
+
+    try {
+      await this.mail.sendMail({
+        to: email,
+        subject: 'Registrasi WorkRecord — unggah dokumen perusahaan',
+        html: `
         <p>Terima kasih mendaftarkan <strong>${dto.companyName}</strong> di WorkRecord.</p>
         <p>Peran Anda: <strong>${primaryRoleLabel}</strong></p>
         <p><strong>ID Login:</strong> ${primaryPublicId}</p>
-        <p>Akun kedua (${partnerRoleLabel}): ${partnerEmail} — akan menerima email aktivasi terpisah.</p>
+        <p>Akun kedua (${partnerRoleLabel}, ${partnerEmail}) telah dikirimi email untuk mengatur kata sandi.</p>
         <p>Login lalu unggah NIB, KTP penanggung jawab, dan Akta perusahaan. Setelah diverifikasi WorkRecord, Anda dapat mencari riwayat kerja berdasarkan NIK KTP karyawan.</p>
       `,
-    });
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Email registrasi ke pembayar gagal (${email}): ${message}`);
+    }
 
-    await this.auth.requestEmailVerification(result.primaryUser.id);
-
-    await this.auth.sendAccountActivation(result.partnerUser.id, {
-      publicLoginId: partnerPublicId,
-      roleLabel: partnerRoleLabel,
-    });
+    try {
+      await this.auth.requestEmailVerification(result.primaryUser.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `Email verifikasi pembayar gagal (${email}): ${message}`,
+      );
+    }
 
     await this.audit.log({
       action: 'COMPANY_REGISTER',
@@ -211,8 +237,9 @@ export class CompaniesService {
       partnerPublicId,
       primaryRole: primaryAccountType,
       partnerRole: partnerAccountType,
+      partnerEmail,
       message:
-        'Registrasi berhasil. Unggah dokumen perusahaan setelah login. Akun kedua menerima email aktivasi.',
+        `Registrasi berhasil. Email aktivasi (atur kata sandi) telah dikirim ke akun kedua: ${partnerEmail}.`,
     };
   }
 

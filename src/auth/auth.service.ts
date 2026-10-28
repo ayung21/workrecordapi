@@ -379,7 +379,7 @@ export class AuthService {
 
   async sendAccountActivation(
     userId: string,
-    meta?: { publicLoginId: string; roleLabel: string },
+    meta?: { publicLoginId: string; roleLabel: string; companyName?: string },
   ) {
     const user = await this.db.query.users.findFirst({
       where: eq(users.id, userId),
@@ -397,17 +397,24 @@ export class AuthService {
     const activateUrl = `${appUrl}/aktivasi-akun?token=${raw}`;
     const roleLabel = meta?.roleLabel ?? 'WorkRecord';
     const loginId = meta?.publicLoginId ?? user.publicLoginId;
+    const companyLine = meta?.companyName
+      ? `<p>Perusahaan: <strong>${meta.companyName}</strong></p>`
+      : '';
 
     await this.mail.sendMail({
       to: user.email,
-      subject: 'Aktivasi akun WorkRecord — verifikasi & kata sandi',
+      subject: 'Atur kata sandi akun WorkRecord Anda',
       html: `
-        <p>Anda terdaftar sebagai <strong>${roleLabel}</strong> di WorkRecord.</p>
-        <p><strong>ID Login:</strong> ${loginId}</p>
-        <p>Untuk mulai menggunakan akun, verifikasi email dan buat kata sandi melalui tautan berikut (berlaku 7 hari):</p>
-        <p><a href="${activateUrl}">Aktivasi akun WorkRecord</a></p>
-        <p>Setelah aktivasi, login dapat menggunakan ID atau email beserta kata sandi baru Anda.</p>
+        <p>Halo ${user.fullName},</p>
+        <p>Anda didaftarkan sebagai <strong>${roleLabel}</strong> di WorkRecord.</p>
+        ${companyLine}
+        <p><strong>ID login:</strong> ${loginId}</p>
+        <p><strong>Email:</strong> ${user.email}</p>
+        <p>Klik tautan berikut untuk <strong>mengatur kata sandi</strong> dan mengaktifkan akun (berlaku 7 hari):</p>
+        <p><a href="${activateUrl}">${activateUrl}</a></p>
+        <p>Setelah selesai, masuk ke WorkRecord dengan ID login atau email dan kata sandi yang Anda buat.</p>
       `,
+      text: `Atur kata sandi akun WorkRecord: ${activateUrl} (ID login: ${loginId})`,
     });
   }
 
