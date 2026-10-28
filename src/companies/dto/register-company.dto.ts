@@ -19,6 +19,11 @@ export class RegisterCompanyDto {
   @MinLength(8)
   companyPhone: string;
 
+  /** Bidang usaha — ditampilkan di verifikasi keanggotaan WorkRecord. */
+  @IsString()
+  @MinLength(2)
+  businessField: string;
+
   @IsString()
   @MinLength(2)
   fullName: string;

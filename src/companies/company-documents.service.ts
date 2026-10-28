@@ -206,7 +206,7 @@ export class CompanyDocumentsService {
       membershipStatus: company.isActive ? 'ACTIVE' : 'SUSPENDED',
       verificationStatus: 'VERIFIED',
       memberCategory: 'Corporate Member',
-      businessField: null as string | null,
+      businessField: company.businessField,
       domicile: this.inferDomicile(company),
       joinedAt,
       validUntil,

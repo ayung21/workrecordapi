@@ -119,6 +119,7 @@ export class CompaniesService {
         .values({
           name: dto.companyName,
           companyPhone: dto.companyPhone,
+          businessField: dto.businessField.trim(),
           adminPublicId,
           leaderPublicId,
           leadershipInvitedAt: new Date(),
@@ -252,6 +253,80 @@ export class CompaniesService {
       actor.companyId,
     );
     return { ...company, verification };
+  }
+
+  private async assertCompanyMember(actor: JwtPayload, companyId: string) {
+    if (actor.roleCode === 'OWNER') return;
+    if (actor.companyId !== companyId) {
+      throw new ForbiddenException('Akses ditolak');
+    }
+  }
+
+  private async canEditCompanySettings(actor: JwtPayload): Promise<boolean> {
+    if (actor.roleCode === 'OWNER') return true;
+    const user = await this.db.query.users.findFirst({
+      where: eq(users.id, actor.sub),
+    });
+    return user?.accountType === 'LEADERSHIP';
+  }
+
+  private async assertLeadershipForSettings(
+    actor: JwtPayload,
+    companyId: string,
+  ) {
+    await this.assertCompanyMember(actor, companyId);
+    if (actor.roleCode === 'OWNER') return;
+    const canEdit = await this.canEditCompanySettings(actor);
+    if (!canEdit) {
+      throw new ForbiddenException(
+        'Hanya akun Pimpinan (Master) yang dapat mengubah bidang usaha',
+      );
+    }
+  }
+
+  async getCompanySettings(companyId: string, actor: JwtPayload) {
+    await this.assertCompanyMember(actor, companyId);
+    const company = await this.findOne(companyId);
+    const canEditBusinessField = await this.canEditCompanySettings(actor);
+    return {
+      id: company.id,
+      name: company.name,
+      companyPhone: company.companyPhone,
+      businessField: company.businessField,
+      operationalStatus: company.operationalStatus,
+      canEditBusinessField,
+    };
+  }
+
+  async updateCompanySettings(
+    companyId: string,
+    actor: JwtPayload,
+    input: { businessField?: string },
+  ) {
+    await this.assertLeadershipForSettings(actor, companyId);
+    if (input.businessField === undefined) {
+      throw new BadRequestException('Tidak ada perubahan');
+    }
+    const trimmed = input.businessField.trim();
+    if (trimmed.length > 0 && trimmed.length < 2) {
+      throw new BadRequestException('Bidang usaha minimal 2 karakter');
+    }
+    const businessField = trimmed.length ? trimmed : null;
+    const [updated] = await this.db
+      .update(companies)
+      .set({ businessField, updatedAt: new Date() })
+      .where(eq(companies.id, companyId))
+      .returning({
+        id: companies.id,
+        name: companies.name,
+        companyPhone: companies.companyPhone,
+        businessField: companies.businessField,
+        operationalStatus: companies.operationalStatus,
+      });
+    return {
+      ...updated,
+      canEditBusinessField: true,
+    };
   }
 
   async listCompanyEmployees(companyId: string, actor: JwtPayload) {
