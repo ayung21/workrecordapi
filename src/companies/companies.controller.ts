@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -130,7 +131,11 @@ export class CompaniesController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Post(':id/documents/:type/upload')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
@@ -144,7 +149,7 @@ export class CompaniesController {
     @UploadedFile() file: { buffer: Buffer; originalname: string },
     @CurrentUser() user: JwtPayload,
   ) {
-    if (!file) throw new Error('File wajib diunggah');
+    if (!file) throw new BadRequestException('File wajib diunggah');
     return this.documents.uploadDocument(id, type, file, user);
   }
 

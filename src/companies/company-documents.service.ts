@@ -28,6 +28,9 @@ export type CompanyDocumentType = (typeof COMPANY_DOCUMENT_TYPES)[number];
 
 const PDF_ONLY_DOCUMENT_TYPES: CompanyDocumentType[] = ['NIB', 'AKTA'];
 
+/** Selaras dengan validasi frontend dan nginx `client_max_body_size`. */
+const COMPANY_DOCUMENT_MAX_BYTES = 5 * 1024 * 1024;
+
 @Injectable()
 export class CompanyDocumentsService {
   constructor(
@@ -419,6 +422,14 @@ export class CompanyDocumentsService {
     if (!company) throw new NotFoundException();
     if (company.operationalStatus === 'ACTIVE') {
       throw new BadRequestException('Perusahaan sudah aktif');
+    }
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('File wajib diunggah');
+    }
+    if (file.buffer.length > COMPANY_DOCUMENT_MAX_BYTES) {
+      throw new BadRequestException(
+        'Ukuran berkas maksimal 5 MB per dokumen',
+      );
     }
 
     await this.ensureDocumentRows(companyId);
