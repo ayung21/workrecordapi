@@ -347,11 +347,30 @@ export class AuthService {
       newEmail: newEmail?.toLowerCase(),
       expiresAt: new Date(Date.now() + 86400_000),
     });
-    const apiUrl = this.config.get('API_URL', 'http://localhost:3000');
+    const apiUrl = this.config.get('API_URL', 'http://localhost:3007');
+    const appUrl = this.config.get('APP_URL', 'http://localhost:3008');
+    const verifyUrl = `${apiUrl}/auth/verify-email?token=${encodeURIComponent(raw)}`;
+    const greeting = user.fullName?.trim() ? `Halo ${user.fullName},` : 'Halo,';
+    const emailChangeNote = newEmail
+      ? `<p>Anda meminta mengubah alamat email ke <strong>${newEmail.toLowerCase()}</strong>. Setelah verifikasi, email login akan diperbarui.</p>`
+      : '';
+
     await this.mail.sendMail({
       to: target,
-      subject: 'Verifikasi email WorkRecord',
-      html: `<p>Verifikasi: <a href="${apiUrl}/auth/verify-email?token=${raw}">klik di sini</a></p>`,
+      subject: 'Verifikasi email akun WorkRecord',
+      html: `
+        <p>${greeting}</p>
+        <p>Terima kasih telah menggunakan WorkRecord — platform netral untuk verifikasi riwayat kerja karyawan.</p>
+        ${emailChangeNote}
+        <p>Untuk mengaktifkan email ini dan dapat <strong>masuk ke akun</strong>, silakan konfirmasi bahwa alamat email ini benar dan milik Anda.</p>
+        <p><a href="${verifyUrl}" style="display:inline-block;padding:12px 20px;background:#0f766e;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Verifikasi email saya</a></p>
+        <p>Atau buka tautan berikut di browser:</p>
+        <p><a href="${verifyUrl}">${verifyUrl}</a></p>
+        <p>Tautan berlaku <strong>24 jam</strong>. Jika Anda tidak mendaftar atau tidak meminta email ini, abaikan pesan ini.</p>
+        <p>Setelah verifikasi, Anda dapat masuk di <a href="${appUrl}">${appUrl}</a> dengan ID login atau email dan kata sandi Anda.</p>
+        <p>Salam,<br/>Tim WorkRecord</p>
+      `,
+      text: `Verifikasi email WorkRecord (berlaku 24 jam): ${verifyUrl}`,
     });
   }
 
@@ -375,6 +394,73 @@ export class AuthService {
         .set({ usedAt: new Date() })
         .where(eq(emailVerificationTokens.id, row.id));
     });
+
+    return { ok: true, message: 'Email berhasil diverifikasi' };
+  }
+
+  /** Halaman HTML untuk tautan verifikasi dari email (GET). */
+  async renderEmailVerificationPage(token: string): Promise<string> {
+    const appUrl = this.config.get('APP_URL', 'http://localhost:3008');
+    const loginUrl = appUrl.replace(/\/$/, '');
+
+    if (!token?.trim()) {
+      return this.verificationResultHtml({
+        ok: false,
+        title: 'Tautan tidak lengkap',
+        body: 'Token verifikasi tidak ditemukan. Buka kembali email WorkRecord dan klik tombol verifikasi, atau minta kirim ulang dari menu akun.',
+        loginUrl,
+      });
+    }
+
+    try {
+      await this.verifyEmail(token.trim());
+      return this.verificationResultHtml({
+        ok: true,
+        title: 'Email berhasil diverifikasi',
+        body:
+          'Alamat email Anda sudah aktif. Anda dapat masuk ke WorkRecord dengan email atau ID login beserta kata sandi yang telah Anda buat.',
+        loginUrl,
+      });
+    } catch {
+      return this.verificationResultHtml({
+        ok: false,
+        title: 'Verifikasi gagal',
+        body:
+          'Tautan tidak valid, sudah dipakai, atau kedaluwarsa (berlaku 24 jam). Minta email verifikasi baru setelah masuk ke akun, atau hubungi admin perusahaan Anda.',
+        loginUrl,
+      });
+    }
+  }
+
+  private verificationResultHtml(opts: {
+    ok: boolean;
+    title: string;
+    body: string;
+    loginUrl: string;
+  }): string {
+    const accent = opts.ok ? '#0f766e' : '#b45309';
+    return `<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${opts.title} — WorkRecord</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f8fafc; margin: 0; padding: 2rem; color: #0f172a; }
+    .card { max-width: 28rem; margin: 0 auto; background: #fff; border-radius: 12px; padding: 2rem; box-shadow: 0 4px 24px rgba(15,23,42,.08); }
+    h1 { font-size: 1.35rem; margin: 0 0 1rem; color: ${accent}; }
+    p { line-height: 1.6; margin: 0 0 1rem; }
+    a.btn { display: inline-block; margin-top: .5rem; padding: 12px 20px; background: #0f766e; color: #fff !important; text-decoration: none; border-radius: 8px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${opts.title}</h1>
+    <p>${opts.body}</p>
+    <p><a class="btn" href="${opts.loginUrl}">Buka WorkRecord</a></p>
+  </div>
+</body>
+</html>`;
   }
 
   async sendAccountActivation(
