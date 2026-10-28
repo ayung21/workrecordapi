@@ -21,6 +21,9 @@ import { UpdateEmployeeRecordDto } from './dto/update-employee-record.dto';
 import { RejectChangeRequestDto } from './dto/reject-change-request.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
+/** Selaras dengan `EMPLOYEE_PHOTO_MAX_UPLOAD_BYTES` di EmployeeRecordsService. */
+const EMPLOYEE_PHOTO_UPLOAD_LIMIT = 5 * 1024 * 1024;
+
 @ApiTags('employee-records')
 @Controller('companies/:companyId/employee-records')
 export class EmployeeRecordsController {
@@ -129,7 +132,11 @@ export class EmployeeRecordsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Post()
-  @UseInterceptors(FileInterceptor('photo'))
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      limits: { fileSize: EMPLOYEE_PHOTO_UPLOAD_LIMIT },
+    }),
+  )
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
@@ -198,7 +205,11 @@ export class EmployeeRecordsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Patch(':id')
-  @UseInterceptors(FileInterceptor('photo'))
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      limits: { fileSize: EMPLOYEE_PHOTO_UPLOAD_LIMIT },
+    }),
+  )
   @ApiConsumes('multipart/form-data', 'application/json')
   update(
     @Param('companyId') companyId: string,

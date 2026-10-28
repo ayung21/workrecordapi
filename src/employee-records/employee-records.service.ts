@@ -36,6 +36,9 @@ import { mkdir, readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 
+/** Selaras dengan validasi & kompresi di frontend sebelum upload. */
+const EMPLOYEE_PHOTO_MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+
 @Injectable()
 export class EmployeeRecordsService {
   constructor(
@@ -402,11 +405,18 @@ export class EmployeeRecordsService {
     return process.env.UPLOAD_DIR ?? join(process.cwd(), 'uploads');
   }
 
+  private assertEmployeePhotoUploadSize(file: { buffer: Buffer }) {
+    if (file.buffer.length > EMPLOYEE_PHOTO_MAX_UPLOAD_BYTES) {
+      throw new BadRequestException('Ukuran foto maksimal 5 MB');
+    }
+  }
+
   private async saveEmployeePhoto(
     companyId: string,
     recordId: string,
     file: { buffer: Buffer; mimetype: string },
   ): Promise<string> {
+    this.assertEmployeePhotoUploadSize(file);
     const compressed = await compressUploadedImage(file, {
       maxEdge: 1200,
       quality: 82,
@@ -421,6 +431,7 @@ export class EmployeeRecordsService {
   private async saveStagingPhoto(
     file: { buffer: Buffer; mimetype: string },
   ): Promise<string> {
+    this.assertEmployeePhotoUploadSize(file);
     const compressed = await compressUploadedImage(file, {
       maxEdge: 1200,
       quality: 82,
