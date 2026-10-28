@@ -170,6 +170,8 @@ export const companies = pgTable('Company', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
   companyPhone: text('companyPhone').notNull(),
+  /** Bidang usaha — ditampilkan di sertifikat member; diubah oleh Pimpinan. */
+  businessField: text('businessField'),
   adminPublicId: text('adminPublicId').notNull().unique(),
   leaderPublicId: text('leaderPublicId').unique(),
   leadershipInvitedAt: timestamp('leadershipInvitedAt', { mode: 'date' }),
