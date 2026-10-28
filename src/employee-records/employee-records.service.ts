@@ -5,9 +5,10 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { and, count, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import {
+  auditLogs,
   companies,
   disputes,
   employeeProfiles,
@@ -112,6 +113,67 @@ export class EmployeeRecordsService {
       }
     }
     throw new BadRequestException('Gagal membuat profil karyawan');
+  }
+
+  private async assertNoDuplicateEmployeeEntry(
+    companyId: string,
+    nationalIdNumber: string,
+    opts?: { excludingRequestId?: string },
+  ) {
+    const nik = this.normalizeNik(nationalIdNumber);
+    const profile = await this.db.query.employeeProfiles.findFirst({
+      where: eq(employeeProfiles.nationalIdNumber, nik),
+    });
+    if (profile) {
+      const active = await this.db.query.employeeRecords.findFirst({
+        where: and(
+          eq(employeeRecords.companyId, companyId),
+          eq(employeeRecords.employeeProfileId, profile.id),
+          isNull(employeeRecords.deletedAt),
+        ),
+      });
+      if (active) {
+        throw new BadRequestException(
+          'Karyawan dengan NIK ini sudah terdaftar di perusahaan Anda',
+        );
+      }
+    }
+
+    const pendingCreates = await this.db
+      .select()
+      .from(recordChangeRequests)
+      .where(
+        and(
+          eq(recordChangeRequests.companyId, companyId),
+          eq(recordChangeRequests.action, 'CREATE'),
+          eq(recordChangeRequests.status, 'PENDING_APPROVAL'),
+        ),
+      );
+    for (const row of pendingCreates) {
+      if (row.id === opts?.excludingRequestId) continue;
+      const payload = row.payload as { nationalIdNumber?: string } | null;
+      const pendingNik = payload?.nationalIdNumber
+        ? this.normalizeNik(payload.nationalIdNumber)
+        : '';
+      if (pendingNik === nik) {
+        throw new BadRequestException(
+          'Pengajuan karyawan dengan NIK ini masih menunggu persetujuan',
+        );
+      }
+    }
+  }
+
+  private rethrowEmployeeRecordDuplicate(err: unknown): never {
+    const code =
+      err && typeof err === 'object' && 'code' in err
+        ? String((err as { code: unknown }).code)
+        : '';
+    if (code === '23505') {
+      throw new BadRequestException(
+        'Karyawan dengan NIK ini sudah terdaftar di perusahaan Anda',
+      );
+    }
+    throw err;
   }
 
   /** Daftar semua record pekerja (panel admin Owner). */
@@ -506,6 +568,8 @@ export class EmployeeRecordsService {
       throw new BadRequestException('Tempat lahir wajib diisi (min. 2 karakter)');
     }
 
+    await this.assertNoDuplicateEmployeeEntry(companyId, dto.nationalIdNumber);
+
     const payload: CreateEmployeeRecordDto & { photoStagingPath?: string } = {
       ...dto,
     };
@@ -553,20 +617,25 @@ export class EmployeeRecordsService {
       );
     }
 
-    const [created] = await this.db
-      .insert(employeeRecords)
-      .values({
-        companyId,
-        employeeProfileId: profileId,
-        employeeName: dto.employeeName,
-        employeeIdNumber: employeeCode,
-        position: dto.position.trim(),
-        conductSummary: dto.conductSummary,
-        joinedAt,
-        leftAt,
-        isPublicPreview: false,
-      })
-      .returning();
+    let created: typeof employeeRecords.$inferSelect;
+    try {
+      [created] = await this.db
+        .insert(employeeRecords)
+        .values({
+          companyId,
+          employeeProfileId: profileId,
+          employeeName: dto.employeeName,
+          employeeIdNumber: employeeCode,
+          position: dto.position.trim(),
+          conductSummary: dto.conductSummary,
+          joinedAt,
+          leftAt,
+          isPublicPreview: false,
+        })
+        .returning();
+    } catch (err) {
+      this.rethrowEmployeeRecordDuplicate(err);
+    }
 
     const photoPath = await this.saveEmployeePhoto(companyId, created.id, photo);
     const [withPhoto] = await this.db
@@ -799,30 +868,32 @@ export class EmployeeRecordsService {
 
   async softDelete(companyId: string, id: string, user: JwtPayload) {
     const gate = await this.access.canCrudRecords(user, companyId);
-    if (!gate.allowed) throw new ForbiddenException(gate.reason);
-
-    if (gate.needsApproval) {
-      const [req] = await this.db
-        .insert(recordChangeRequests)
-        .values({
-          companyId,
-          employeeRecordId: id,
-          action: 'DELETE',
-          status: 'PENDING_APPROVAL',
-          payload: { id },
-          requestedById: user.sub,
-        })
-        .returning();
-      await this.audit.log({
-        action: 'RECORD_DELETE',
-        actorUserId: user.sub,
-        companyId,
-        entityType: 'RecordChangeRequest',
-        entityId: req.id,
-        metadata: { employeeRecordId: id, pendingApproval: true },
-      });
-      return req;
+    if (!gate.allowed) {
+      const msg =
+        gate.reason === 'company_not_active'
+          ? 'Perusahaan belum aktif'
+          : (gate.reason ?? 'Tidak diizinkan');
+      throw new ForbiddenException(msg);
     }
+
+    const actor = await this.db.query.users.findFirst({
+      where: eq(users.id, user.sub),
+    });
+    if (!actor) throw new NotFoundException();
+    if (user.roleCode !== 'OWNER' && actor.accountType !== 'LEADERSHIP') {
+      throw new ForbiddenException(
+        'Hanya akun Pimpinan (Master) yang dapat menghapus data karyawan',
+      );
+    }
+
+    const existing = await this.db.query.employeeRecords.findFirst({
+      where: and(
+        eq(employeeRecords.id, id),
+        eq(employeeRecords.companyId, companyId),
+        isNull(employeeRecords.deletedAt),
+      ),
+    });
+    if (!existing) throw new NotFoundException('Data karyawan tidak ditemukan');
 
     const [deleted] = await this.db
       .update(employeeRecords)
@@ -837,6 +908,97 @@ export class EmployeeRecordsService {
       entityId: id,
     });
     return deleted;
+  }
+
+  async listDeletedHistory(companyId: string, user: JwtPayload) {
+    if (user.roleCode !== 'OWNER' && user.companyId !== companyId) {
+      throw new ForbiddenException();
+    }
+    await this.access.assertPortalCompanyActive(user);
+
+    const rows = await this.db
+      .select({
+        record: employeeRecords,
+        nationalIdNumber: employeeProfiles.nationalIdNumber,
+      })
+      .from(employeeRecords)
+      .leftJoin(
+        employeeProfiles,
+        eq(employeeRecords.employeeProfileId, employeeProfiles.id),
+      )
+      .where(
+        and(
+          eq(employeeRecords.companyId, companyId),
+          isNotNull(employeeRecords.deletedAt),
+        ),
+      )
+      .orderBy(desc(employeeRecords.deletedAt))
+      .limit(200);
+
+    const recordIds = rows.map(({ record: r }) => r.id);
+    const deletedByMap = new Map<
+      string,
+      { fullName: string; publicLoginId: string }
+    >();
+
+    if (recordIds.length) {
+      const logs = await this.db
+        .select({
+          entityId: auditLogs.entityId,
+          actorUserId: auditLogs.actorUserId,
+          createdAt: auditLogs.createdAt,
+        })
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.companyId, companyId),
+            eq(auditLogs.action, 'RECORD_DELETE'),
+            eq(auditLogs.entityType, 'EmployeeRecord'),
+            inArray(auditLogs.entityId, recordIds),
+          ),
+        )
+        .orderBy(desc(auditLogs.createdAt));
+
+      const actorIds = [
+        ...new Set(logs.map((l) => l.actorUserId).filter(Boolean) as string[]),
+      ];
+      const actors =
+        actorIds.length > 0
+          ? await this.db
+              .select({
+                id: users.id,
+                fullName: users.fullName,
+                publicLoginId: users.publicLoginId,
+              })
+              .from(users)
+              .where(inArray(users.id, actorIds))
+          : [];
+      const actorById = new Map(actors.map((a) => [a.id, a]));
+
+      for (const log of logs) {
+        if (!log.entityId || deletedByMap.has(log.entityId)) continue;
+        const u = log.actorUserId ? actorById.get(log.actorUserId) : undefined;
+        if (u) {
+          deletedByMap.set(log.entityId, {
+            fullName: u.fullName,
+            publicLoginId: u.publicLoginId,
+          });
+        }
+      }
+    }
+
+    return {
+      items: rows.map(({ record: r, nationalIdNumber }) => ({
+        id: r.id,
+        employeeName: r.employeeName,
+        nationalIdNumber,
+        position: r.position,
+        joinedAt: r.joinedAt,
+        leftAt: r.leftAt,
+        deletedAt: r.deletedAt,
+        deletedBy: deletedByMap.get(r.id) ?? null,
+      })),
+    };
   }
 
   async approveChange(requestId: string, leader: JwtPayload) {
@@ -863,6 +1025,9 @@ export class EmployeeRecordsService {
       const p = req.payload as unknown as CreateEmployeeRecordDto & {
         photoStagingPath?: string;
       };
+      await this.assertNoDuplicateEmployeeEntry(req.companyId, p.nationalIdNumber, {
+        excludingRequestId: requestId,
+      });
       const profileId = await this.upsertEmployeeProfile({
         nationalIdNumber: p.nationalIdNumber,
         fullName: p.employeeName,
@@ -880,20 +1045,25 @@ export class EmployeeRecordsService {
           'Tanggal selesai kerja tidak boleh sebelum tanggal mulai',
         );
       }
-      const [created] = await this.db
-        .insert(employeeRecords)
-        .values({
-          companyId: req.companyId,
-          employeeProfileId: profileId,
-          employeeName: p.employeeName,
-          employeeIdNumber: employeeCode,
-          position: p.position,
-          conductSummary: p.conductSummary,
-          joinedAt,
-          leftAt,
-          isPublicPreview: false,
-        })
-        .returning();
+      let created: typeof employeeRecords.$inferSelect;
+      try {
+        [created] = await this.db
+          .insert(employeeRecords)
+          .values({
+            companyId: req.companyId,
+            employeeProfileId: profileId,
+            employeeName: p.employeeName,
+            employeeIdNumber: employeeCode,
+            position: p.position,
+            conductSummary: p.conductSummary,
+            joinedAt,
+            leftAt,
+            isPublicPreview: false,
+          })
+          .returning();
+      } catch (err) {
+        this.rethrowEmployeeRecordDuplicate(err);
+      }
       if (p.photoStagingPath) {
         const data = await readFile(p.photoStagingPath);
         const mimetype =

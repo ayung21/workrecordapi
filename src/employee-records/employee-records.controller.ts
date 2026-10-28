@@ -90,6 +90,16 @@ export class EmployeeRecordsController {
 
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @Get('deleted')
+  listDeleted(
+    @Param('companyId') companyId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.records.listDeletedHistory(companyId, user);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
   @Get(':id/changes')
   changeHistory(
     @Param('companyId') companyId: string,

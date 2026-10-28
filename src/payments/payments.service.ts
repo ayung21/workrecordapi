@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { eq } from 'drizzle-orm';
+import { eq, and, desc } from 'drizzle-orm';
 import { ViewDurationUnit } from '../database/enums';
 import { DatabaseService } from '../database/database.service';
 import { payments, users, voucherRedemptions } from '../database/schema';
@@ -332,6 +332,87 @@ export class PaymentsService {
     return trimmed ? trimmed.toUpperCase() : undefined;
   }
 
+  private async findPendingBlacklistPayment(input: {
+    companyId: string;
+    employeeRecordId: string;
+    changeRequestId?: string;
+  }) {
+    const rows = await this.db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          eq(payments.companyId, input.companyId),
+          eq(payments.type, 'BLACKLIST'),
+          eq(payments.status, 'PENDING'),
+        ),
+      )
+      .orderBy(desc(payments.createdAt));
+
+    for (const row of rows) {
+      const meta = (row.metadata ?? {}) as {
+        employeeRecordId?: string;
+        changeRequestId?: string;
+      };
+      if (meta.employeeRecordId !== input.employeeRecordId) continue;
+      if (input.changeRequestId !== undefined) {
+        if (meta.changeRequestId !== input.changeRequestId) continue;
+      } else if (meta.changeRequestId) {
+        continue;
+      }
+      return row;
+    }
+    return null;
+  }
+
+  private checkoutResponseFromPayment(payment: typeof payments.$inferSelect) {
+    const meta = (payment.metadata ?? {}) as Record<string, unknown>;
+    const amount = Number(payment.amount);
+    const catalogAmountRaw = meta.originalAmount;
+    const catalogAmount =
+      typeof catalogAmountRaw === 'number'
+        ? catalogAmountRaw
+        : catalogAmountRaw != null
+          ? Number(catalogAmountRaw)
+          : amount;
+    const discountedBase =
+      typeof meta.discountedAmount === 'number'
+        ? meta.discountedAmount
+        : catalogAmount;
+
+    let manualTransfer;
+    if (meta.manualTransfer && meta.manualBankSnapshot) {
+      const snap = meta.manualBankSnapshot as {
+        bankName: string;
+        accountNumber: string;
+        accountHolder: string;
+        label?: string | null;
+      };
+      manualTransfer = this.buildManualTransferPayload(
+        {
+          id: String(meta.manualBankAccountId ?? ''),
+          bankName: snap.bankName,
+          accountNumber: snap.accountNumber,
+          accountHolder: snap.accountHolder,
+          label: snap.label ?? undefined,
+        },
+        amount,
+        typeof meta.baseAmount === 'number' ? meta.baseAmount : amount,
+        meta.uniqueCode as number,
+      );
+    }
+
+    return {
+      paymentId: payment.id,
+      amount,
+      originalAmount: catalogAmount,
+      discountedAmount: discountedBase,
+      discountAmount: Math.max(0, catalogAmount - discountedBase),
+      redirectUrl: undefined as string | undefined,
+      manualTransfer,
+    };
+  }
+
   async createBlacklistPayment(input: {
     userId: string;
     companyId: string;
@@ -356,6 +437,15 @@ export class PaymentsService {
       where: eq(users.id, input.userId),
     });
     if (!user) throw new NotFoundException();
+
+    const existingPending = await this.findPendingBlacklistPayment({
+      companyId: input.companyId,
+      employeeRecordId: input.employeeRecordId,
+      changeRequestId: input.changeRequestId,
+    });
+    if (existingPending) {
+      return this.checkoutResponseFromPayment(existingPending);
+    }
 
     const [payment] = await this.db
       .insert(payments)
