@@ -35,7 +35,7 @@ import {
   resolveUploadPath,
   toRelativeUploadPath,
 } from '../common/utils/upload-path';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -905,15 +905,10 @@ export class EmployeeRecordsService {
       .where(eq(employeeRecords.id, id));
 
     if (dto.photoStagingPath) {
-      const data = await readFile(dto.photoStagingPath);
-      const mimetype = dto.photoStagingPath.endsWith('.png')
-        ? 'image/png'
-        : dto.photoStagingPath.endsWith('.webp')
-          ? 'image/webp'
-          : 'image/jpeg';
+      const { data, mime } = await this.readPhotoBytes(dto.photoStagingPath);
       const photoPath = await this.saveEmployeePhoto(companyId, id, {
         buffer: data,
-        mimetype,
+        mimetype: mime,
       });
       await this.db
         .update(employeeRecords)
@@ -1121,17 +1116,11 @@ export class EmployeeRecordsService {
         this.rethrowEmployeeRecordDuplicate(err);
       }
       if (p.photoStagingPath) {
-        const data = await readFile(p.photoStagingPath);
-        const mimetype =
-          p.photoStagingPath.endsWith('.png')
-            ? 'image/png'
-            : p.photoStagingPath.endsWith('.webp')
-              ? 'image/webp'
-              : 'image/jpeg';
+        const { data, mime } = await this.readPhotoBytes(p.photoStagingPath);
         const photoPath = await this.saveEmployeePhoto(
           req.companyId,
           created.id,
-          { buffer: data, mimetype },
+          { buffer: data, mimetype: mime },
         );
         await this.db
           .update(employeeRecords)
