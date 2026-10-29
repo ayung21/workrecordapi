@@ -438,6 +438,7 @@ export class BlacklistsService {
     return {
       companyId: row.companyId,
       companyName: company?.name ?? 'Perusahaan',
+      companyPhone: company?.companyPhone ?? null,
       employeeRecordId: row.employeeRecordId,
     };
   }
@@ -454,6 +455,7 @@ export class BlacklistsService {
       .select({
         companyId: employeeBlacklists.companyId,
         companyName: companies.name,
+        companyPhone: companies.companyPhone,
         employeeRecordId: employeeBlacklists.employeeRecordId,
       })
       .from(employeeBlacklists)
@@ -471,6 +473,7 @@ export class BlacklistsService {
     const out: {
       companyId: string;
       companyName: string;
+      companyPhone: string | null;
       employeeRecordId: string | null;
     }[] = [];
     for (const row of activeRows) {
@@ -479,6 +482,7 @@ export class BlacklistsService {
       out.push({
         companyId: row.companyId,
         companyName: row.companyName,
+        companyPhone: row.companyPhone ?? null,
         employeeRecordId: row.employeeRecordId,
       });
     }

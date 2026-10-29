@@ -426,6 +426,7 @@ export class EmployeeRecordsService {
       disputedByEmployer: Boolean(recordDispute),
       disputedByCompanyId: recordDispute?.companyId ?? null,
       disputedByCompanyName: recordDispute?.companyName ?? null,
+      disputedByCompanyPhone: recordDispute?.companyPhone ?? null,
     };
 
     return {
