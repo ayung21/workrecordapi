@@ -23,6 +23,7 @@ import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { UpdateSurveyDto } from './dto/update-survey.dto';
 import { InviteLeadershipDto } from './dto/invite-leadership.dto';
 import { UpdateCompanySettingsDto } from './dto/update-company-settings.dto';
+import { UpdateCompanyProfileDto } from './dto/update-company-profile.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { JwtPayload } from '../auth/types/jwt-payload';
 import {
@@ -203,6 +204,17 @@ export class CompaniesController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.documents.activateCompanyIfReady(id, user.sub);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Patch(':id/profile')
+  @RequirePermissions('companies.manage_all')
+  updateCompanyProfile(
+    @Param('id') id: string,
+    @Body() dto: UpdateCompanyProfileDto,
+  ) {
+    return this.companies.updateCompanyProfileByOwner(id, dto);
   }
 
   @ApiBearerAuth()

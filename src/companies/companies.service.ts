@@ -7,10 +7,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { and, asc, count, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import {
   companies,
+  emailVerificationTokens,
   payments,
   roles,
   subscriptions,
@@ -270,40 +271,146 @@ export class CompaniesService {
     return user?.accountType === 'LEADERSHIP';
   }
 
-  private async assertLeadershipForSettings(
+  private async assertLeadershipPortalSettings(
     actor: JwtPayload,
     companyId: string,
   ) {
     await this.assertCompanyMember(actor, companyId);
-    if (actor.roleCode === 'OWNER') return;
+    if (actor.roleCode === 'OWNER') {
+      throw new ForbiddenException(
+        'Pengaturan portal hanya untuk akun Pimpinan perusahaan',
+      );
+    }
     const canEdit = await this.canEditCompanySettings(actor);
     if (!canEdit) {
       throw new ForbiddenException(
-        'Hanya akun Pimpinan (Master) yang dapat mengubah bidang usaha',
+        'Hanya akun Pimpinan (Master) yang dapat mengubah pengaturan',
       );
     }
   }
 
+  private async findCompanyAdminUser(companyId: string) {
+    const admin = await this.db.query.users.findFirst({
+      where: and(
+        eq(users.companyId, companyId),
+        eq(users.accountType, 'ADMIN'),
+      ),
+    });
+    if (!admin) {
+      throw new NotFoundException('Akun Admin perusahaan tidak ditemukan');
+    }
+    return admin;
+  }
+
+  private async pendingEmailChangeForUser(userId: string) {
+    const rows = await this.db
+      .select({
+        newEmail: emailVerificationTokens.newEmail,
+        expiresAt: emailVerificationTokens.expiresAt,
+      })
+      .from(emailVerificationTokens)
+      .where(
+        and(
+          eq(emailVerificationTokens.userId, userId),
+          isNull(emailVerificationTokens.usedAt),
+          gt(emailVerificationTokens.expiresAt, new Date()),
+        ),
+      )
+      .orderBy(desc(emailVerificationTokens.createdAt))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async getCompanySettings(companyId: string, actor: JwtPayload) {
-    await this.assertCompanyMember(actor, companyId);
+    await this.assertLeadershipPortalSettings(actor, companyId);
     const company = await this.findOne(companyId);
-    const canEditBusinessField = await this.canEditCompanySettings(actor);
+    const admin = await this.findCompanyAdminUser(companyId);
+    const pending = await this.pendingEmailChangeForUser(admin.id);
     return {
       id: company.id,
       name: company.name,
       companyPhone: company.companyPhone,
-      businessField: company.businessField,
       operationalStatus: company.operationalStatus,
-      canEditBusinessField,
+      adminAccount: {
+        fullName: admin.fullName,
+        publicLoginId: admin.publicLoginId,
+        email: admin.email,
+        personalPhone: admin.personalPhone,
+        emailVerifiedAt: admin.emailVerifiedAt,
+        pendingEmail: pending?.newEmail ?? null,
+        pendingEmailExpiresAt: pending?.expiresAt ?? null,
+      },
     };
   }
 
   async updateCompanySettings(
     companyId: string,
     actor: JwtPayload,
+    input: { adminEmail?: string; companyPhone?: string },
+  ) {
+    await this.assertLeadershipPortalSettings(actor, companyId);
+    const admin = await this.findCompanyAdminUser(companyId);
+    const company = await this.findOne(companyId);
+
+    if (input.adminEmail === undefined && input.companyPhone === undefined) {
+      throw new BadRequestException('Tidak ada perubahan');
+    }
+
+    if (input.companyPhone !== undefined) {
+      const phone = input.companyPhone.trim();
+      if (phone.length < 8) {
+        throw new BadRequestException('Telepon perusahaan minimal 8 karakter');
+      }
+      await this.db
+        .update(companies)
+        .set({ companyPhone: phone, updatedAt: new Date() })
+        .where(eq(companies.id, companyId));
+      await this.audit.log({
+        action: 'RECORD_UPDATE',
+        actorUserId: actor.sub,
+        companyId,
+        entityType: 'Company',
+        entityId: companyId,
+        metadata: { field: 'companyPhone' },
+      });
+    }
+
+    if (input.adminEmail !== undefined) {
+      const nextEmail = input.adminEmail.trim().toLowerCase();
+      if (nextEmail === admin.email.toLowerCase()) {
+        throw new BadRequestException('Email baru sama dengan email saat ini');
+      }
+      const taken = await this.db.query.users.findFirst({
+        where: eq(users.email, nextEmail),
+      });
+      if (taken && taken.id !== admin.id) {
+        throw new ConflictException('Email sudah digunakan akun lain');
+      }
+      const leader = await this.db.query.users.findFirst({
+        where: eq(users.id, actor.sub),
+      });
+      await this.auth.sendEmailChangeVerification(admin.id, nextEmail, {
+        companyName: company.name,
+        initiatedBy: leader?.fullName ?? 'Pimpinan perusahaan',
+        roleLabel: 'Admin perusahaan',
+      });
+      await this.audit.log({
+        action: 'RECORD_UPDATE',
+        actorUserId: actor.sub,
+        companyId,
+        entityType: 'User',
+        entityId: admin.id,
+        metadata: { field: 'adminEmail', pendingEmail: nextEmail },
+      });
+    }
+
+    return this.getCompanySettings(companyId, actor);
+  }
+
+  async updateCompanyProfileByOwner(
+    companyId: string,
     input: { businessField?: string },
   ) {
-    await this.assertLeadershipForSettings(actor, companyId);
     if (input.businessField === undefined) {
       throw new BadRequestException('Tidak ada perubahan');
     }
@@ -323,10 +430,8 @@ export class CompaniesService {
         businessField: companies.businessField,
         operationalStatus: companies.operationalStatus,
       });
-    return {
-      ...updated,
-      canEditBusinessField: true,
-    };
+    if (!updated) throw new NotFoundException();
+    return updated;
   }
 
   async listCompanyEmployees(companyId: string, actor: JwtPayload) {
@@ -575,6 +680,7 @@ export class CompaniesService {
         name: companies.name,
         adminPublicId: companies.adminPublicId,
         companyPhone: companies.companyPhone,
+        businessField: companies.businessField,
         operationalStatus: companies.operationalStatus,
         surveyStatus: companies.surveyStatus,
         createdAt: companies.createdAt,

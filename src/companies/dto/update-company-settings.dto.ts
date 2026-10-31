@@ -1,8 +1,13 @@
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
 
+/** Pengaturan portal — hanya Pimpinan (Master): akun Admin PT & telepon perusahaan. */
 export class UpdateCompanySettingsDto {
   @IsOptional()
+  @IsEmail({}, { message: 'Format email admin tidak valid' })
+  adminEmail?: string;
+
+  @IsOptional()
   @IsString()
-  @MaxLength(200, { message: 'Bidang usaha maksimal 200 karakter' })
-  businessField?: string;
+  @MinLength(8, { message: 'Telepon perusahaan minimal 8 karakter' })
+  companyPhone?: string;
 }
