@@ -9,7 +9,7 @@ import {
   generateMemberCertificateId,
   generateSecureToken,
 } from '../common/utils/id-generator';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
 import { extname, join } from 'path';
 import { DatabaseService } from '../database/database.service';
 import { companies, companyDocuments } from '../database/schema';
@@ -554,6 +554,88 @@ export class CompanyDocumentsService {
     });
 
     return updated;
+  }
+
+  /**
+   * Owner meminta PT mengunggah ulang satu dokumen.
+   * Portal dikunci (PENDING_DOCUMENTS) sampai verifikasi penuh selesai lagi.
+   */
+  async requestDocumentReupload(
+    companyId: string,
+    type: CompanyDocumentType,
+    actorUserId: string,
+    note?: string,
+  ) {
+    await this.ensureDocumentRows(companyId);
+    const company = await this.db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    if (!company) throw new NotFoundException();
+
+    const doc = await this.db.query.companyDocuments.findFirst({
+      where: and(
+        eq(companyDocuments.companyId, companyId),
+        eq(companyDocuments.type, type),
+      ),
+    });
+    if (!doc?.filePath) {
+      throw new BadRequestException('Belum ada berkas untuk diminta unggah ulang');
+    }
+
+    try {
+      await unlink(doc.filePath);
+    } catch {
+      /* berkas mungkin sudah tidak ada di disk */
+    }
+
+    const portalNote =
+      note?.trim() ||
+      'Tim WorkRecord meminta Anda mengunggah ulang berkas ini. Portal terkunci sampai verifikasi selesai lagi.';
+
+    await this.db
+      .update(companyDocuments)
+      .set({
+        filePath: null,
+        status: 'MISSING',
+        rejectReason: portalNote,
+        uploadedAt: null,
+        reviewedAt: null,
+        reviewedByUserId: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(companyDocuments.id, doc.id));
+
+    const wasActive = company.operationalStatus === 'ACTIVE';
+
+    await this.db
+      .update(companies)
+      .set({
+        operationalStatus: 'PENDING_DOCUMENTS',
+        surveyStatus: wasActive ? 'PENDING' : company.surveyStatus,
+        verifiedAt: null,
+        siteVerificationStatus: 'NOT_REQUESTED',
+        siteVerificationMethod: null,
+        siteVerificationScheduledAt: null,
+        siteVerificationMeetingUrl: null,
+        siteVerificationAdminNotes: null,
+        siteVerificationCompletedAt: null,
+        memberCertificateId: null,
+        memberVerifyToken: null,
+        memberCertificateExpiresAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId));
+
+    await this.audit.log({
+      action: 'COMPANY_SURVEY_UPDATE',
+      actorUserId,
+      companyId,
+      entityType: 'CompanyDocument',
+      entityId: doc.id,
+      metadata: { type, action: 'request_reupload', note: portalNote },
+    });
+
+    return this.getVerificationStatus(companyId);
   }
 
   async activateCompanyIfReady(companyId: string, actorUserId: string) {

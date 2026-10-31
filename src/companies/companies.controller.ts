@@ -31,6 +31,7 @@ import {
   CompanyDocumentType,
 } from './company-documents.service';
 import { ReviewCompanyDocumentDto } from './dto/review-company-document.dto';
+import { RequestDocumentReuploadDto } from './dto/request-document-reupload.dto';
 import { RequestSiteVerificationDto } from './dto/request-site-verification.dto';
 import { ScheduleSiteVerificationDto } from './dto/schedule-site-verification.dto';
 import { basename } from 'path';
@@ -192,6 +193,24 @@ export class CompaniesController {
       dto.approve,
       user.sub,
       dto.rejectReason,
+    );
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Post(':id/documents/:type/request-reupload')
+  @RequirePermissions('companies.survey')
+  requestDocumentReupload(
+    @Param('id') id: string,
+    @Param('type') type: CompanyDocumentType,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: RequestDocumentReuploadDto,
+  ) {
+    return this.documents.requestDocumentReupload(
+      id,
+      type,
+      user.sub,
+      dto.note,
     );
   }
 

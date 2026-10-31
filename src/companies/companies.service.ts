@@ -346,14 +346,39 @@ export class CompaniesService {
   async updateCompanySettings(
     companyId: string,
     actor: JwtPayload,
-    input: { adminEmail?: string; companyPhone?: string },
+    input: { adminEmail?: string; adminFullName?: string; companyPhone?: string },
   ) {
     await this.assertLeadershipPortalSettings(actor, companyId);
     const admin = await this.findCompanyAdminUser(companyId);
     const company = await this.findOne(companyId);
 
-    if (input.adminEmail === undefined && input.companyPhone === undefined) {
+    if (
+      input.adminEmail === undefined &&
+      input.adminFullName === undefined &&
+      input.companyPhone === undefined
+    ) {
       throw new BadRequestException('Tidak ada perubahan');
+    }
+
+    if (input.adminFullName !== undefined) {
+      const name = input.adminFullName.trim();
+      if (name.length < 2) {
+        throw new BadRequestException('Nama admin minimal 2 karakter');
+      }
+      if (name !== admin.fullName) {
+        await this.db
+          .update(users)
+          .set({ fullName: name, updatedAt: new Date() })
+          .where(eq(users.id, admin.id));
+        await this.audit.log({
+          action: 'RECORD_UPDATE',
+          actorUserId: actor.sub,
+          companyId,
+          entityType: 'User',
+          entityId: admin.id,
+          metadata: { field: 'adminFullName' },
+        });
+      }
     }
 
     if (input.companyPhone !== undefined) {

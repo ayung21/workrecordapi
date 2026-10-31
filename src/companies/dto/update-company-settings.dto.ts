@@ -8,6 +8,11 @@ export class UpdateCompanySettingsDto {
 
   @IsOptional()
   @IsString()
+  @MinLength(2, { message: 'Nama admin minimal 2 karakter' })
+  adminFullName?: string;
+
+  @IsOptional()
+  @IsString()
   @MinLength(8, { message: 'Telepon perusahaan minimal 8 karakter' })
   companyPhone?: string;
 }
