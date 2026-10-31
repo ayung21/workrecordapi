@@ -339,39 +339,160 @@ export class AuthService {
       where: eq(users.id, userId),
     });
     if (!user) throw new NotFoundException();
-    const target = (newEmail ?? user.email).toLowerCase();
+    if (newEmail?.trim()) {
+      await this.sendEmailChangeVerification(userId, newEmail, {
+        roleLabel: 'akun WorkRecord',
+      });
+      return;
+    }
+    const target = user.email.toLowerCase();
     const raw = generateSecureToken();
     await this.db.insert(emailVerificationTokens).values({
       userId,
       tokenHash: hashToken(raw),
-      newEmail: newEmail?.toLowerCase(),
       expiresAt: new Date(Date.now() + 86400_000),
     });
-    const apiUrl = this.config.get('API_URL', 'http://localhost:3007');
-    const appUrl = this.config.get('APP_URL', 'http://localhost:3008');
+    const apiUrl = this.config.get('API_URL', 'http://localhost:3007').replace(/\/$/, '');
+    const appUrl = this.config.get('APP_URL', 'http://localhost:3008').replace(/\/$/, '');
     const verifyUrl = `${apiUrl}/auth/verify-email?token=${encodeURIComponent(raw)}`;
     const greeting = user.fullName?.trim() ? `Halo ${user.fullName},` : 'Halo,';
-    const emailChangeNote = newEmail
-      ? `<p>Anda meminta mengubah alamat email ke <strong>${newEmail.toLowerCase()}</strong>. Setelah verifikasi, email login akan diperbarui.</p>`
-      : '';
-
+    const html = this.buildEmailVerificationMessageHtml({
+      greeting,
+      roleLabel: 'akun WorkRecord',
+      newEmail: target,
+      verifyUrl,
+      appUrl,
+      companyBlock: '',
+      initiatorBlock: '',
+    });
     await this.mail.sendMail({
       to: target,
       subject: 'Verifikasi email akun WorkRecord',
-      html: `
-        <p>${greeting}</p>
-        <p>Terima kasih telah menggunakan WorkRecord — platform netral untuk verifikasi riwayat kerja karyawan.</p>
-        ${emailChangeNote}
-        <p>Untuk mengaktifkan email ini dan dapat <strong>masuk ke akun</strong>, silakan konfirmasi bahwa alamat email ini benar dan milik Anda.</p>
-        <p><a href="${verifyUrl}" style="display:inline-block;padding:12px 20px;background:#0f766e;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Verifikasi email saya</a></p>
-        <p>Atau buka tautan berikut di browser:</p>
-        <p><a href="${verifyUrl}">${verifyUrl}</a></p>
-        <p>Tautan berlaku <strong>24 jam</strong>. Jika Anda tidak mendaftar atau tidak meminta email ini, abaikan pesan ini.</p>
-        <p>Setelah verifikasi, Anda dapat masuk di <a href="${appUrl}">${appUrl}</a> dengan ID login atau email dan kata sandi Anda.</p>
-        <p>Salam,<br/>Tim WorkRecord</p>
-      `,
-      text: `Verifikasi email WorkRecord (berlaku 24 jam): ${verifyUrl}`,
+      html,
+      text: `Verifikasi email WorkRecord (24 jam): ${verifyUrl}`,
     });
+  }
+
+  async sendEmailChangeVerification(
+    userId: string,
+    newEmail: string,
+    context?: {
+      companyName?: string;
+      initiatedBy?: string;
+      roleLabel?: string;
+    },
+  ) {
+    const user = await this.db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+    if (!user) throw new NotFoundException();
+
+    const normalized = newEmail.trim().toLowerCase();
+    if (!normalized.includes('@')) {
+      throw new BadRequestException('Email tidak valid');
+    }
+
+    const raw = generateSecureToken();
+    await this.db.insert(emailVerificationTokens).values({
+      userId,
+      tokenHash: hashToken(raw),
+      newEmail: normalized,
+      expiresAt: new Date(Date.now() + 86400_000),
+    });
+
+    const apiUrl = this.config.get('API_URL', 'http://localhost:3007').replace(/\/$/, '');
+    const appUrl = this.config.get('APP_URL', 'http://localhost:3008').replace(/\/$/, '');
+    const verifyUrl = `${apiUrl}/auth/verify-email?token=${encodeURIComponent(raw)}`;
+    const greeting = user.fullName?.trim() ? `Halo ${user.fullName},` : 'Halo,';
+    const roleLabel = context?.roleLabel ?? 'akun WorkRecord';
+    const companyBlock = context?.companyName
+      ? `<tr><td style="padding:0 0 16px;font-size:14px;line-height:1.6;color:#475569;">
+            Perusahaan: <strong style="color:#0f172a;">${context.companyName}</strong>
+          </td></tr>`
+      : '';
+    const initiatorBlock = context?.initiatedBy
+      ? `<tr><td style="padding:0 0 16px;font-size:14px;line-height:1.6;color:#475569;">
+            Permintaan ini diajukan oleh <strong style="color:#0f172a;">${context.initiatedBy}</strong> (Pimpinan/Master).
+          </td></tr>`
+      : '';
+
+    const html = this.buildEmailVerificationMessageHtml({
+      greeting,
+      roleLabel,
+      newEmail: normalized,
+      verifyUrl,
+      appUrl,
+      companyBlock,
+      initiatorBlock,
+    });
+
+    await this.mail.sendMail({
+      to: normalized,
+      subject: 'Verifikasi email Admin WorkRecord',
+      html,
+      text: `Verifikasi email ${roleLabel} WorkRecord (24 jam): ${verifyUrl}`,
+    });
+  }
+
+  private buildEmailVerificationMessageHtml(opts: {
+    greeting: string;
+    roleLabel: string;
+    newEmail: string;
+    verifyUrl: string;
+    appUrl: string;
+    companyBlock: string;
+    initiatorBlock: string;
+  }): string {
+    return `<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Verifikasi email — WorkRecord</title>
+</head>
+<body style="margin:0;padding:0;background:#eef2f8;font-family:Segoe UI,system-ui,-apple-system,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eef2f8;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 12px 40px rgba(15,23,42,.08);">
+          <tr>
+            <td style="padding:28px 28px 20px;background:linear-gradient(135deg,#1e3a8a 0%,#2459df 100%);">
+              <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#bfdbfe;">WorkRecord</p>
+              <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;line-height:1.3;">Verifikasi alamat email</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                <tr><td style="padding:0 0 12px;font-size:16px;font-weight:600;color:#0f172a;">${opts.greeting}</td></tr>
+                ${opts.companyBlock}
+                ${opts.initiatorBlock}
+                <tr><td style="padding:0 0 16px;font-size:14px;line-height:1.65;color:#475569;">
+                  Konfirmasi bahwa <strong style="color:#0f172a;">${opts.newEmail}</strong> akan menjadi email login untuk <strong>${opts.roleLabel}</strong>.
+                  Setelah verifikasi, Admin dapat masuk dengan email baru dan kata sandi yang sama.
+                </td></tr>
+                <tr><td align="center" style="padding:8px 0 20px;">
+                  <a href="${opts.verifyUrl}" style="display:inline-block;padding:14px 28px;background:#2459df;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">Verifikasi email saya</a>
+                </td></tr>
+                <tr><td style="padding:0 0 12px;font-size:12px;line-height:1.6;color:#64748b;">
+                  Tautan berlaku <strong>24 jam</strong>. Jika tombol tidak berfungsi, salin URL berikut ke browser:
+                </td></tr>
+                <tr><td style="padding:0 0 16px;font-size:11px;line-height:1.5;color:#2459df;word-break:break-all;">
+                  <a href="${opts.verifyUrl}" style="color:#2459df;">${opts.verifyUrl}</a>
+                </td></tr>
+                <tr><td style="padding:16px 0 0;border-top:1px solid #e2e8f0;font-size:12px;line-height:1.6;color:#94a3b8;">
+                  Jika Anda tidak mengharapkan email ini, abaikan pesan ini. Portal: <a href="${opts.appUrl}" style="color:#2459df;">${opts.appUrl}</a>
+                </td></tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+        <p style="margin:16px 0 0;font-size:11px;color:#94a3b8;">© WorkRecord — verifikasi riwayat kerja tenaga kerja</p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
   }
 
   async verifyEmail(token: string) {
