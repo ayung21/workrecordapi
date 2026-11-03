@@ -96,7 +96,7 @@ export class AuthService {
     }
 
     const ok = await bcrypt.compare(password, user.passwordHash);
-    if (!ok) throw new UnauthorizedException('Kredensial tidak valid');
+    if (!ok) throw new UnauthorizedException('Password salah');
 
     return user;
   }
