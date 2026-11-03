@@ -35,7 +35,7 @@ export function parseDateOnlyField(
 }
 
 export function parseOptionalDateOnlyField(
-  raw: string | undefined,
+  raw: string | null | undefined,
   fieldLabel: string,
 ): Date | null {
   const trimmed = raw?.trim();
