@@ -21,6 +21,7 @@ import { JwtPayload } from '../auth/types/jwt-payload';
 import { PaymentsService } from '../payments/payments.service';
 import { AuditService } from '../audit/audit.service';
 import { AccessService } from '../access/access.service';
+import { CompanyApprovalMailService } from '../mail/company-approval-mail.service';
 
 @Injectable()
 export class BlacklistsService {
@@ -30,6 +31,7 @@ export class BlacklistsService {
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
     private readonly access: AccessService,
+    private readonly approvalMail: CompanyApprovalMailService,
   ) {}
 
   private get db() {
@@ -142,6 +144,14 @@ export class BlacklistsService {
           employeeRecordId: input.employeeRecordId,
           pendingApproval: true,
         },
+      });
+      void this.approvalMail.notifyLeadershipChangeRequest({
+        companyId: user.companyId,
+        requestId: req.id,
+        action: 'BLACKLIST',
+        requestedByUserId: user.sub,
+        employeeRecordId: input.employeeRecordId,
+        payload: req.payload,
       });
       return {
         mode: 'PENDING_APPROVAL' as const,

@@ -23,6 +23,7 @@ import { CreateEmployeeRecordDto } from './dto/create-employee-record.dto';
 import { UpdateEmployeeRecordDto } from './dto/update-employee-record.dto';
 import { AuditService } from '../audit/audit.service';
 import { BlacklistsService } from '../blacklists/blacklists.service';
+import { CompanyApprovalMailService } from '../mail/company-approval-mail.service';
 import { compressUploadedImage } from '../common/utils/compress-image';
 import { generateWorkRecordPublicId } from '../common/utils/id-generator';
 import {
@@ -49,6 +50,7 @@ export class EmployeeRecordsService {
     private readonly access: AccessService,
     private readonly audit: AuditService,
     private readonly blacklists: BlacklistsService,
+    private readonly approvalMail: CompanyApprovalMailService,
   ) {}
 
   private get db() {
@@ -57,6 +59,20 @@ export class EmployeeRecordsService {
 
   private normalizeNik(nik: string): string {
     return nik.replace(/\D/g, '');
+  }
+
+  private notifyLeadershipPendingRequest(
+    req: typeof recordChangeRequests.$inferSelect,
+  ): void {
+    if (req.action === 'DELETE') return;
+    void this.approvalMail.notifyLeadershipChangeRequest({
+      companyId: req.companyId,
+      requestId: req.id,
+      action: req.action as 'CREATE' | 'UPDATE' | 'BLACKLIST',
+      requestedByUserId: req.requestedById,
+      employeeRecordId: req.employeeRecordId,
+      payload: req.payload,
+    });
   }
 
   private async nationalIdForRecord(record: {
@@ -653,6 +669,7 @@ export class EmployeeRecordsService {
         entityId: req.id,
         metadata: { pendingApproval: true },
       });
+      this.notifyLeadershipPendingRequest(req);
       return req;
     }
 
@@ -749,6 +766,7 @@ export class EmployeeRecordsService {
         entityId: req.id,
         metadata: { employeeRecordId: id, pendingApproval: true },
       });
+      this.notifyLeadershipPendingRequest(req);
       return req;
     }
 
@@ -807,6 +825,7 @@ export class EmployeeRecordsService {
         entityId: req.id,
         metadata: { employeeRecordId: id, pendingApproval: true },
       });
+      this.notifyLeadershipPendingRequest(req);
       return req;
     }
 
