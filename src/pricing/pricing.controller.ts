@@ -18,6 +18,7 @@ import { JwtPayload } from '../auth/types/jwt-payload';
 import { PricingService } from './pricing.service';
 import { UpdateServiceFeesDto } from './dto/update-service-fees.dto';
 import { UpdateManualPaymentBankDto } from './dto/update-manual-payment-bank.dto';
+import { UpdateSupportHotlineDto } from './dto/update-support-hotline.dto';
 import { CreateAdPackageDto } from './dto/create-ad-package.dto';
 import { UpdateAdPackageDto } from './dto/update-ad-package.dto';
 import { adPlacementSlots } from '../database/enums';
@@ -73,6 +74,17 @@ export class PricingController {
     @Body() dto: UpdateManualPaymentBankDto,
   ) {
     return this.pricing.setManualPaymentBanks(dto.accounts, user.sub);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequireRoles(PLATFORM_OWNER_ROLE)
+  @Patch('admin/support-hotline')
+  updateSupportHotline(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateSupportHotlineDto,
+  ) {
+    return this.pricing.setSupportHotline(dto, user.sub);
   }
 
   @ApiBearerAuth()

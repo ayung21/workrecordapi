@@ -12,6 +12,12 @@ import { AdPlacementSlot, adPlacementSlots } from '../database/enums';
 
 const SERVICE_FEES_KEY = 'service_fees';
 const MANUAL_PAYMENT_BANK_KEY = 'manual_payment_bank';
+const SUPPORT_HOTLINE_KEY = 'support_hotline';
+
+export type SupportHotline = {
+  phone: string;
+  label?: string;
+};
 
 export type ManualPaymentBankAccount = {
   id: string;
@@ -439,13 +445,79 @@ export class PricingService {
     return map[slot] ?? slot;
   }
 
+  private envSupportHotline(): SupportHotline | null {
+    const phone = this.config.get<string>('SUPPORT_HOTLINE')?.trim();
+    if (!phone) return null;
+    const label =
+      this.config.get<string>('SUPPORT_HOTLINE_LABEL')?.trim() || 'Hotline';
+    return { phone, label };
+  }
+
+  private sanitizeSupportHotline(raw: unknown): SupportHotline | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const v = raw as Record<string, unknown>;
+    const phone = String(v.phone ?? '').trim();
+    if (phone.length < 8) return null;
+    const label = v.label != null ? String(v.label).trim() : undefined;
+    return { phone, label: label || 'Hotline' };
+  }
+
+  async getSupportHotline(): Promise<SupportHotline | null> {
+    const [row] = await this.db
+      .select()
+      .from(platformPricing)
+      .where(eq(platformPricing.key, SUPPORT_HOTLINE_KEY))
+      .limit(1);
+    if (row?.valueJson) {
+      const fromDb = this.sanitizeSupportHotline(row.valueJson);
+      if (fromDb) return fromDb;
+    }
+    return this.envSupportHotline();
+  }
+
+  async setSupportHotline(
+    input: { phone: string; label?: string },
+    updatedByUserId: string,
+  ): Promise<SupportHotline> {
+    const phone = input.phone.trim();
+    if (phone.length < 8) {
+      throw new BadRequestException('Nomor hotline minimal 8 karakter');
+    }
+    if (!/^[\d\s+()-]+$/.test(phone)) {
+      throw new BadRequestException('Format nomor hotline tidak valid');
+    }
+    const next: SupportHotline = {
+      phone,
+      label: input.label?.trim() || 'Hotline',
+    };
+    await this.db
+      .insert(platformPricing)
+      .values({
+        key: SUPPORT_HOTLINE_KEY,
+        valueJson: next,
+        updatedByUserId,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: platformPricing.key,
+        set: {
+          valueJson: next,
+          updatedByUserId,
+          updatedAt: new Date(),
+        },
+      });
+    return next;
+  }
+
   async getPublicCatalog() {
     const fees = await this.getServiceFees();
     const adPackages = await this.listPurchasableAdPackages();
+    const supportHotline = await this.getSupportHotline();
     const idr = fees.sanggahanKaryawanIdr;
     const adIdr = fees.adPlacementIdr;
     return {
       currency: 'IDR',
+      supportHotline,
       fees: {
         sanggahanKaryawanIdr: idr,
         adPlacementIdr: adIdr,

@@ -280,6 +280,10 @@ export class PlatformService {
       storage: {
         uploadDir: this.config.get<string>('UPLOAD_DIR') ?? 'uploads',
       },
+      support: {
+        hotline: await this.pricing.getSupportHotline(),
+        hint: 'Nomor hotline tampil di website & portal PT — ubah di bawah lalu simpan.',
+      },
     };
   }
 
