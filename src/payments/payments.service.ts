@@ -60,8 +60,12 @@ export class PaymentsService {
   }
 
   async getManualBankInstructions() {
+    const gateway = this.gatewayFactory.gatewayName();
+    if (gateway !== 'manual') {
+      return { gateway, accounts: [] as ManualPaymentBankAccount[] };
+    }
     const accounts = await this.pricing.getManualPaymentBanks();
-    return { accounts };
+    return { gateway, accounts };
   }
 
   private buildManualTransferPayload(
@@ -140,6 +144,26 @@ export class PaymentsService {
       itemName: input.itemName,
     });
 
+    if (result.contractId || result.qrUrl || result.qrContent) {
+      meta = {
+        ...meta,
+        winpay: {
+          contractId: result.contractId ?? null,
+          qrUrl: result.qrUrl ?? null,
+          qrContent: result.qrContent ?? null,
+          expiredAt: result.expiredAt ?? null,
+        },
+      };
+      await this.db
+        .update(payments)
+        .set({
+          metadata: meta,
+          gatewayTxnId: result.contractId,
+          updatedAt: new Date(),
+        })
+        .where(eq(payments.id, current.id));
+    }
+
     const manualTransfer =
       this.gatewayFactory.isManual() && bankAccount
         ? this.buildManualTransferPayload(
@@ -149,6 +173,17 @@ export class PaymentsService {
             meta.uniqueCode as number,
           )
         : undefined;
+
+    if (
+      !this.gatewayFactory.isManual() &&
+      !result.qrUrl &&
+      !result.qrContent &&
+      !result.redirectUrl
+    ) {
+      throw new BadRequestException(
+        'Gateway pembayaran tidak mengembalikan QRIS atau tautan bayar. Coba lagi beberapa saat.',
+      );
+    }
 
     void this.billingMail.notifyCheckoutRequired({
       payment: current,
@@ -178,6 +213,17 @@ export class PaymentsService {
       discountedAmount: discountedBase,
       discountAmount: Math.max(0, catalogAmount - discountedBase),
       ...result,
+      qris:
+        result.qrUrl || result.qrContent
+          ? {
+              paymentId: current.id,
+              qrUrl: result.qrUrl ?? null,
+              qrContent: result.qrContent ?? null,
+              contractId: result.contractId ?? null,
+              expiredAt: result.expiredAt ?? null,
+              amount,
+            }
+          : undefined,
       manualTransfer,
     };
   }
@@ -323,6 +369,7 @@ export class PaymentsService {
       customerName: user.fullName,
       itemName: `Langganan WorkRecord ${months} bulan`,
     });
+    await this.persistWinpayMeta(payment.id, result);
 
     return { paymentId: payment.id, subscriptionId: sub.id, ...result };
   }
@@ -409,6 +456,26 @@ export class PaymentsService {
       }
     }
 
+    const winpay = meta.winpay as
+      | {
+          qrUrl?: string | null;
+          qrContent?: string | null;
+          contractId?: string | null;
+          expiredAt?: string | null;
+        }
+      | undefined;
+    const qris =
+      winpay && (winpay.qrUrl || winpay.qrContent)
+        ? {
+            paymentId: payment.id,
+            qrUrl: winpay.qrUrl ?? null,
+            qrContent: winpay.qrContent ?? null,
+            contractId: winpay.contractId ?? null,
+            expiredAt: winpay.expiredAt ?? null,
+            amount,
+          }
+        : undefined;
+
     return {
       paymentId: payment.id,
       amount,
@@ -417,6 +484,7 @@ export class PaymentsService {
       discountAmount: Math.max(0, catalogAmount - discountedBase),
       redirectUrl: undefined as string | undefined,
       manualTransfer,
+      qris,
     };
   }
 
@@ -451,7 +519,38 @@ export class PaymentsService {
       changeRequestId: input.changeRequestId,
     });
     if (existingPending) {
-      return this.checkoutResponseFromPayment(existingPending);
+      const reused = this.checkoutResponseFromPayment(existingPending);
+      if (reused.manualTransfer || reused.qris) return reused;
+      if (
+        existingPending.gateway === 'winpay' &&
+        existingPending.gatewayOrderId
+      ) {
+        const result = await this.gateway().createPayment({
+          orderId: existingPending.gatewayOrderId,
+          amount: Number(existingPending.amount),
+          customerEmail: input.email,
+          customerName: user.fullName,
+          itemName: 'Blacklist / sanggahan karyawan — WorkRecord',
+        });
+        await this.persistWinpayMeta(existingPending.id, result);
+        if (!result.qrUrl && !result.qrContent) {
+          throw new BadRequestException(
+            'Gateway pembayaran tidak mengembalikan QRIS. Coba lagi beberapa saat.',
+          );
+        }
+        return {
+          ...reused,
+          qris: {
+            paymentId: existingPending.id,
+            qrUrl: result.qrUrl ?? null,
+            qrContent: result.qrContent ?? null,
+            contractId: result.contractId ?? null,
+            expiredAt: result.expiredAt ?? null,
+            amount: Number(existingPending.amount),
+          },
+        };
+      }
+      return reused;
     }
 
     const [payment] = await this.db
@@ -579,6 +678,7 @@ export class PaymentsService {
       customerName: input.email,
       itemName: 'Akses lihat record karyawan',
     });
+    await this.persistWinpayMeta(payment.id, result);
 
     return { paymentId: payment.id, ...result };
   }
@@ -620,7 +720,9 @@ export class PaymentsService {
         .set({
           status: 'PAID',
           paidAt: new Date(),
-          gatewayTxnId: String(payload.transaction_id ?? ''),
+          gatewayTxnId: String(
+            payload.transaction_id ?? payload.originalReferenceNo ?? '',
+          ),
           updatedAt: new Date(),
         })
         .where(eq(payments.id, payment.id));
@@ -643,6 +745,90 @@ export class PaymentsService {
     }
 
     return { ok: true };
+  }
+
+  private async persistWinpayMeta(
+    paymentId: string,
+    result: {
+      contractId?: string;
+      qrUrl?: string;
+      qrContent?: string | null;
+      expiredAt?: string;
+    },
+  ) {
+    if (!result.contractId && !result.qrUrl && !result.qrContent) return;
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    if (!payment) return;
+    const meta = {
+      ...((payment.metadata ?? {}) as Record<string, unknown>),
+      winpay: {
+        contractId: result.contractId ?? null,
+        qrUrl: result.qrUrl ?? null,
+        qrContent: result.qrContent ?? null,
+        expiredAt: result.expiredAt ?? null,
+      },
+    };
+    await this.db
+      .update(payments)
+      .set({
+        metadata: meta,
+        gatewayTxnId: result.contractId,
+        updatedAt: new Date(),
+      })
+      .where(eq(payments.id, paymentId));
+  }
+
+  async handleWinpayCallback(input: {
+    path: string;
+    rawBody: string;
+    body: Record<string, unknown>;
+    timestamp?: string;
+    signature?: string;
+  }) {
+    this.gatewayFactory.getWinpay().assertCallbackSignature(input);
+    await this.handleWebhook(input.body);
+    return {
+      responseCode: '2005200',
+      responseMessage: 'success',
+    };
+  }
+
+  async refreshQrisStatus(paymentId: string, actorUserId: string) {
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    if (!payment) throw new NotFoundException();
+    if (payment.userId && payment.userId !== actorUserId) {
+      throw new ForbiddenException('Pembayaran ini bukan milik akun Anda');
+    }
+    if (payment.status === 'PAID') {
+      return { status: 'PAID', paymentId: payment.id };
+    }
+    const meta = (payment.metadata ?? {}) as {
+      winpay?: { contractId?: string };
+    };
+    const contractId = meta.winpay?.contractId ?? payment.gatewayTxnId;
+    if (!contractId || !payment.gatewayOrderId) {
+      throw new BadRequestException('Data QRIS Winpay belum lengkap');
+    }
+    const queried = await this.gatewayFactory
+      .getWinpay()
+      .queryPayment(payment.gatewayOrderId, contractId);
+    await this.handleWebhook({
+      originalPartnerReferenceNo: payment.gatewayOrderId,
+      latestTransactionStatus: queried.latestTransactionStatus,
+      originalReferenceNo: queried.originalReferenceNo,
+    });
+    const fresh = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    return {
+      status: fresh?.status ?? payment.status,
+      paymentId,
+      latestTransactionStatus: queried.latestTransactionStatus ?? null,
+    };
   }
 
   async mockComplete(paymentId: string, mockSecret?: string) {

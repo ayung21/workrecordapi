@@ -9,6 +9,10 @@ export interface CreatePaymentInput {
 export interface CreatePaymentResult {
   redirectUrl?: string;
   snapToken?: string;
+  qrUrl?: string;
+  qrContent?: string | null;
+  contractId?: string;
+  expiredAt?: string;
   raw: unknown;
 }
 
