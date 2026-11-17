@@ -61,6 +61,13 @@ export class PaymentsController {
 
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @Get('payments/:id/qris')
+  qrisCheckout(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.payments.getQrisCheckout(id, user.sub);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
   @Get('payments/:id/qris-status')
   qrisStatus(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.payments.refreshQrisStatus(id, user.sub);

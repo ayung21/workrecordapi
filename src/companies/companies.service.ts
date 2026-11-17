@@ -498,6 +498,29 @@ export class CompaniesService {
         .map((b) => [b.employeeRecordId!, b]),
     );
 
+    const pendingPayRows = await this.db
+      .select({
+        id: payments.id,
+        metadata: payments.metadata,
+      })
+      .from(payments)
+      .where(
+        and(
+          eq(payments.companyId, companyId),
+          eq(payments.type, 'BLACKLIST'),
+          eq(payments.status, 'PENDING'),
+        ),
+      )
+      .orderBy(desc(payments.createdAt));
+    const pendingPayByRecord = new Map<string, string>();
+    for (const pay of pendingPayRows) {
+      const recordId = (pay.metadata as { employeeRecordId?: string } | null)
+        ?.employeeRecordId;
+      if (recordId && !pendingPayByRecord.has(recordId)) {
+        pendingPayByRecord.set(recordId, pay.id);
+      }
+    }
+
     const recordIds = rows.map(({ record: r }) => r.id);
     const changeCountByRecord = new Map<string, number>();
     if (recordIds.length) {
@@ -536,6 +559,7 @@ export class CompaniesService {
         hasBlacklist: Boolean(bl),
         blacklistId: bl?.id ?? null,
         blacklistNote: bl?.note ?? null,
+        pendingBlacklistPaymentId: bl ? null : pendingPayByRecord.get(r.id) ?? null,
         changeRevisionCount: changeCountByRecord.get(r.id) ?? 0,
         createdAt: r.createdAt,
       };

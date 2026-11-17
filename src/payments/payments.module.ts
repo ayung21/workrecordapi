@@ -6,6 +6,7 @@ import { BimaSaktiGateway } from './bimasakti.gateway';
 import { ManualGateway } from './manual.gateway';
 import { WinpayGateway } from './winpay.gateway';
 import { PaymentGatewayFactory } from './payment-gateway.factory';
+import { PaymentLiveHub } from './payment-live.hub';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { ViewAccessModule } from '../view-access/view-access.module';
 import { BlacklistsModule } from '../blacklists/blacklists.module';
@@ -27,8 +28,9 @@ import { AdsModule } from '../ads/ads.module';
     ManualGateway,
     WinpayGateway,
     PaymentGatewayFactory,
+    PaymentLiveHub,
   ],
   controllers: [PaymentsController],
-  exports: [PaymentsService, PaymentGatewayFactory],
+  exports: [PaymentsService, PaymentGatewayFactory, PaymentLiveHub],
 })
 export class PaymentsModule {}

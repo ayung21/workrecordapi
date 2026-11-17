@@ -12,6 +12,7 @@ import { ViewDurationUnit } from '../database/enums';
 import { DatabaseService } from '../database/database.service';
 import { payments, users, voucherRedemptions } from '../database/schema';
 import { PaymentGatewayFactory } from './payment-gateway.factory';
+import { PaymentLiveHub } from './payment-live.hub';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { ViewAccessService } from '../view-access/view-access.service';
 import { v4 as uuidv4 } from 'uuid';
@@ -49,6 +50,7 @@ export class PaymentsService {
     @Inject(forwardRef(() => AdsService))
     private readonly ads: AdsService,
     private readonly billingMail: BillingMailService,
+    private readonly live: PaymentLiveHub,
   ) {}
 
   private get db() {
@@ -737,11 +739,29 @@ export class PaymentsService {
         entityId: payment.id,
         metadata: { type: payment.type, gateway: payment.gateway },
       });
+      this.live.publish({
+        type: 'payment.updated',
+        paymentId: payment.id,
+        status: 'PAID',
+        paymentType: payment.type,
+        companyId: payment.companyId,
+        gateway: payment.gateway,
+        paidAt: new Date().toISOString(),
+      });
     } else if (!success && !pending && payment.status === 'PENDING') {
       await this.db
         .update(payments)
         .set({ status: 'FAILED', updatedAt: new Date() })
         .where(eq(payments.id, payment.id));
+      this.live.publish({
+        type: 'payment.updated',
+        paymentId: payment.id,
+        status: 'FAILED',
+        paymentType: payment.type,
+        companyId: payment.companyId,
+        gateway: payment.gateway,
+        paidAt: null,
+      });
     }
 
     return { ok: true };
@@ -795,14 +815,46 @@ export class PaymentsService {
     };
   }
 
+  private async assertCompanyPaymentAccess(
+    payment: { userId: string | null; companyId: string | null },
+    actorUserId: string,
+  ) {
+    if (!payment.userId || payment.userId === actorUserId) return;
+    const actor = await this.db.query.users.findFirst({
+      where: eq(users.id, actorUserId),
+    });
+    if (
+      actor &&
+      payment.companyId &&
+      actor.companyId === payment.companyId
+    ) {
+      return;
+    }
+    throw new ForbiddenException('Pembayaran ini bukan milik akun Anda');
+  }
+
+  async getQrisCheckout(paymentId: string, actorUserId: string) {
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    if (!payment) throw new NotFoundException();
+    await this.assertCompanyPaymentAccess(payment, actorUserId);
+    if (payment.status === 'PAID') {
+      return { status: 'PAID' as const, paymentId: payment.id, qris: null };
+    }
+    const reused = this.checkoutResponseFromPayment(payment);
+    if (!reused.qris) {
+      throw new BadRequestException('QRIS untuk pembayaran ini tidak tersedia');
+    }
+    return { status: payment.status, paymentId: payment.id, qris: reused.qris };
+  }
+
   async refreshQrisStatus(paymentId: string, actorUserId: string) {
     const payment = await this.db.query.payments.findFirst({
       where: eq(payments.id, paymentId),
     });
     if (!payment) throw new NotFoundException();
-    if (payment.userId && payment.userId !== actorUserId) {
-      throw new ForbiddenException('Pembayaran ini bukan milik akun Anda');
-    }
+    await this.assertCompanyPaymentAccess(payment, actorUserId);
     if (payment.status === 'PAID') {
       return { status: 'PAID', paymentId: payment.id };
     }
