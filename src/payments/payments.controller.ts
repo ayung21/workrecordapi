@@ -68,6 +68,16 @@ export class PaymentsController {
 
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @Post('payments/:id/cancel')
+  cancelPending(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.payments.cancelPendingPayment(id, user.sub);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
   @Get('payments/:id/qris-status')
   qrisStatus(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.payments.refreshQrisStatus(id, user.sub);

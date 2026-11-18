@@ -715,6 +715,12 @@ export class PaymentsService {
       verified.transactionStatus === 'capture' ||
       verified.transactionStatus === 'settlement';
     const pending = verified.transactionStatus === 'pending';
+    const cancelledByUser = Boolean(
+      (payment.metadata as { cancelledByUser?: boolean } | null)?.cancelledByUser,
+    );
+    if (cancelledByUser) {
+      return { ok: true, ignored: 'cancelled' };
+    }
 
     if (success && payment.status !== 'PAID') {
       await this.db
@@ -833,6 +839,54 @@ export class PaymentsService {
     throw new ForbiddenException('Pembayaran ini bukan milik akun Anda');
   }
 
+  async cancelPendingPayment(paymentId: string, actorUserId: string) {
+    const payment = await this.db.query.payments.findFirst({
+      where: eq(payments.id, paymentId),
+    });
+    if (!payment) throw new NotFoundException();
+    await this.assertCompanyPaymentAccess(payment, actorUserId);
+    if (payment.type !== 'BLACKLIST') {
+      throw new BadRequestException(
+        'Hanya pembayaran sanggahan yang bisa dibatalkan dari daftar ini',
+      );
+    }
+    if (payment.status === 'PAID') {
+      throw new BadRequestException(
+        'Pembayaran sudah diterima dan tidak bisa dibatalkan',
+      );
+    }
+    if (payment.status !== 'PENDING') {
+      return { paymentId: payment.id, status: payment.status };
+    }
+
+    const metadata = {
+      ...((payment.metadata ?? {}) as Record<string, unknown>),
+      cancelledByUser: true,
+      cancelledAt: new Date().toISOString(),
+      cancelledByUserId: actorUserId,
+    };
+    await this.db
+      .update(payments)
+      .set({
+        status: 'EXPIRED',
+        metadata,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(payments.id, payment.id), eq(payments.status, 'PENDING')));
+
+    this.live.publish({
+      type: 'payment.updated',
+      paymentId: payment.id,
+      status: 'FAILED',
+      paymentType: payment.type,
+      companyId: payment.companyId,
+      gateway: payment.gateway,
+      paidAt: null,
+    });
+
+    return { paymentId: payment.id, status: 'EXPIRED' as const };
+  }
+
   async getQrisCheckout(paymentId: string, actorUserId: string) {
     const payment = await this.db.query.payments.findFirst({
       where: eq(payments.id, paymentId),
@@ -841,6 +895,11 @@ export class PaymentsService {
     await this.assertCompanyPaymentAccess(payment, actorUserId);
     if (payment.status === 'PAID') {
       return { status: 'PAID' as const, paymentId: payment.id, qris: null };
+    }
+    if (payment.status !== 'PENDING') {
+      throw new BadRequestException(
+        'Pembayaran ini sudah tidak bisa dilanjutkan',
+      );
     }
     const reused = this.checkoutResponseFromPayment(payment);
     if (!reused.qris) {
