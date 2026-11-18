@@ -224,6 +224,8 @@ export class PaymentsService {
               contractId: result.contractId ?? null,
               expiredAt: result.expiredAt ?? null,
               amount,
+              originalAmount: catalogAmount,
+              discountAmount: Math.max(0, catalogAmount - discountedBase),
             }
           : undefined,
       manualTransfer,
@@ -466,6 +468,7 @@ export class PaymentsService {
           expiredAt?: string | null;
         }
       | undefined;
+    const discountAmount = Math.max(0, catalogAmount - discountedBase);
     const qris =
       winpay && (winpay.qrUrl || winpay.qrContent)
         ? {
@@ -475,6 +478,8 @@ export class PaymentsService {
             contractId: winpay.contractId ?? null,
             expiredAt: winpay.expiredAt ?? null,
             amount,
+            originalAmount: catalogAmount,
+            discountAmount,
           }
         : undefined;
 
@@ -520,7 +525,32 @@ export class PaymentsService {
       employeeRecordId: input.employeeRecordId,
       changeRequestId: input.changeRequestId,
     });
+
     if (existingPending) {
+      const pendingMeta = (existingPending.metadata ?? {}) as {
+        voucherCode?: string;
+      };
+      const samePrice =
+        Number(existingPending.amount) === amount &&
+        (pendingMeta.voucherCode ?? '') === (voucherCode ?? '');
+      if (!samePrice) {
+        await this.db
+          .update(payments)
+          .set({
+            status: 'EXPIRED',
+            metadata: {
+              ...((existingPending.metadata ?? {}) as Record<string, unknown>),
+              supersededByVoucher: true,
+            },
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(payments.id, existingPending.id),
+              eq(payments.status, 'PENDING'),
+            ),
+          );
+      } else {
       const reused = this.checkoutResponseFromPayment(existingPending);
       if (reused.manualTransfer || reused.qris) return reused;
       if (
@@ -549,10 +579,28 @@ export class PaymentsService {
             contractId: result.contractId ?? null,
             expiredAt: result.expiredAt ?? null,
             amount: Number(existingPending.amount),
+            originalAmount: reused.originalAmount,
+            discountAmount: reused.discountAmount,
           },
         };
       }
       return reused;
+      }
+    }
+
+    if (amount <= 0) {
+      return this.settleFreeBlacklistPayment({
+        userId: input.userId,
+        companyId: input.companyId,
+        employeeRecordId: input.employeeRecordId,
+        email: input.email,
+        note: input.note,
+        orderId,
+        baseAmount,
+        voucherId: priced.voucherId,
+        voucherCode,
+        changeRequestId: input.changeRequestId,
+      });
     }
 
     const [payment] = await this.db
@@ -885,6 +933,64 @@ export class PaymentsService {
     });
 
     return { paymentId: payment.id, status: 'EXPIRED' as const };
+  }
+
+  private async settleFreeBlacklistPayment(input: {
+    userId: string;
+    companyId: string;
+    employeeRecordId: string;
+    email: string;
+    note: string;
+    orderId: string;
+    baseAmount: number;
+    voucherId?: string;
+    voucherCode?: string;
+    changeRequestId?: string;
+  }) {
+    const [payment] = await this.db
+      .insert(payments)
+      .values({
+        userId: input.userId,
+        companyId: input.companyId,
+        type: 'BLACKLIST',
+        status: 'PAID',
+        amount: '0',
+        gatewayOrderId: input.orderId,
+        gateway: this.gatewayFactory.gatewayName(),
+        paidAt: new Date(),
+        metadata: {
+          employeeRecordId: input.employeeRecordId,
+          email: input.email,
+          note: input.note,
+          voucherId: input.voucherId,
+          voucherCode: input.voucherCode,
+          originalAmount: input.baseAmount,
+          discountedAmount: 0,
+          changeRequestId: input.changeRequestId,
+          settledByVoucher: true,
+        },
+      })
+      .returning();
+
+    await this.fulfillPaidPayment(payment.id);
+    this.live.publish({
+      type: 'payment.updated',
+      paymentId: payment.id,
+      status: 'PAID',
+      paymentType: payment.type,
+      companyId: payment.companyId,
+      gateway: payment.gateway,
+      paidAt: payment.paidAt?.toISOString() ?? new Date().toISOString(),
+    });
+
+    return {
+      paymentId: payment.id,
+      amount: 0,
+      originalAmount: input.baseAmount,
+      discountedAmount: 0,
+      discountAmount: input.baseAmount,
+      settled: true as const,
+    };
   }
 
   async getQrisCheckout(paymentId: string, actorUserId: string) {
